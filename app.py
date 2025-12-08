@@ -1176,16 +1176,3 @@ st.markdown("""
     <p style="font-size: 0.9em;">Все файлы экспортируются в формате PNG для промышленной совместимости</p>
 </div>
 """, unsafe_allow_html=True)
-
-# ==================== ПРОВЕРКА ЗАВИСИМОСТЕЙ ====================
-
-try:
-    # Проверяем основные зависимости
-    dependencies_ok = True
-    
-    # Проверка OpenCV
-    cv2_version = cv2.__version__
-    
-    # Проверка PyTorch
-    torch_version = torch.__version__
-    cuda_available = torch.cuda.is_available()
