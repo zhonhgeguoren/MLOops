@@ -194,6 +194,9 @@ if 'uploaded_file' not in st.session_state:
 if 'selected_method' not in st.session_state:
     st.session_state.selected_method = "K-средних кластеризация"
 
+if 'combined_preview' not in st.session_state:
+    st.session_state.combined_preview = None
+
 # ==================== КЛАССЫ ДЛЯ МЕТОДА DECOMPOSE ====================
 
 class _MyDataset(torch.utils.data.Dataset):
@@ -664,6 +667,13 @@ def save_bw_mask_as_png(mask, filename):
         st.error(f"Ошибка при создании ЧБ маски PNG: {e}")
         return None
 
+def resize_layer_to_match(layer, target_shape):
+    """Изменяет размер слоя до целевого размера"""
+    if layer.shape[:2] == target_shape[:2]:
+        return layer
+    
+    return cv2.resize(layer, (target_shape[1], target_shape[0]), interpolation=cv2.INTER_LINEAR)
+
 # ==================== БОКОВАЯ ПАНЕЛЬ ====================
 
 with st.sidebar:
@@ -973,8 +983,19 @@ if st.session_state.uploaded_file is not None:
             for idx in sorted_indices:
                 if st.session_state.layer_visibility[idx]:
                     layer = color_layers[idx]
+                    
+                    # ИЗМЕНЕНИЕ: Проверяем размеры и изменяем при необходимости
+                    if layer.shape != combined.shape:
+                        layer = resize_layer_to_match(layer, combined.shape)
+                    
+                    # Создаем маску (где есть цвет, отличный от фона)
                     mask = np.any(layer != bg_color_rgb, axis=2)
+                    
+                    # Применяем слой только там, где есть маска
                     combined[mask] = layer[mask]
+            
+            # Сохраняем комбинированный превью в session state
+            st.session_state.combined_preview = combined
             
             # Отображаем комбинированное изображение
             combined_rgb = cv2.cvtColor(combined, cv2.COLOR_BGR2RGB)
@@ -995,7 +1016,13 @@ if st.session_state.uploaded_file is not None:
                 
                 for i, layer in enumerate(color_layers):
                     if st.session_state.layer_visibility[i]:
-                        layer_mask = create_bw_mask(layer, bg_color_rgb)
+                        # ИЗМЕНЕНИЕ: Проверяем размеры
+                        if layer.shape[:2] != combined_bw_mask.shape:
+                            layer_resized = resize_layer_to_match(layer, combined_bw_mask.shape[:2] + (3,))
+                        else:
+                            layer_resized = layer
+                        
+                        layer_mask = create_bw_mask(layer_resized, bg_color_rgb)
                         combined_bw_mask = cv2.bitwise_or(combined_bw_mask, layer_mask)
                 
                 combined_png_data = save_bw_mask_as_png(combined_bw_mask, "combined_mask")
@@ -1176,3 +1203,30 @@ st.markdown("""
     <p style="font-size: 0.9em;">Все файлы экспортируются в формате PNG для промышленной совместимости</p>
 </div>
 """, unsafe_allow_html=True)
+
+# ==================== ПРОВЕРКА ЗАВИСИМОСТЕЙ ====================
+
+try:
+    # Проверяем основные зависимости
+    dependencies_ok = True
+    
+    # Проверка OpenCV
+    cv2_version = cv2.__version__
+    
+    # Проверка PyTorch
+    torch_version = torch.__version__
+    cuda_available = torch.cuda.is_available()
+    
+    # Проверка scikit-learn
+    from sklearn import __version__ as sklearn_version
+    
+    # Выводим информацию в sidebar
+    with st.sidebar.expander("ℹ️ Информация о системе", expanded=False):
+        st.write(f"**OpenCV:** {cv2_version}")
+        st.write(f"**PyTorch:** {torch_version}")
+        st.write(f"**CUDA:** {'✅ Доступен' if cuda_available else '❌ Не доступен'}")
+        st.write(f"**scikit-learn:** {sklearn_version}")
+        st.write(f"**Streamlit:** {st.__version__}")
+        
+except Exception as e:
+    st.sidebar.error(f"Ошибка проверки зависимостей: {e}")
