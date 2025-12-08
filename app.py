@@ -27,13 +27,20 @@ warnings.filterwarnings('ignore')
 
 def check_model_exists():
     """Проверяет наличие модели в папке model/"""
-    model_path = Path("model/mask_generator7.pth")
+    mask_model_path = Path("model/mask_generator.pth")
+    residue_model_path = Path("model/residue_predictor.pth")
     
-    if model_path.exists():
-        file_size = model_path.stat().st_size / (1024 * 1024)  # MB
-        return True, f"✅ Модель найдена: {model_path} ({file_size:.2f} MB)"
+    if mask_model_path.exists() and residue_model_path.exists():
+        mask_size = mask_model_path.stat().st_size / (1024 * 1024)  # MB
+        residue_size = residue_model_path.stat().st_size / (1024 * 1024)  # MB
+        return True, f"✅ Модели найдены:\n- mask_generator.pth ({mask_size:.2f} MB)\n- residue_predictor.pth ({residue_size:.2f} MB)"
     else:
-        return False, "❌ Модель не найдена в папке model/"
+        missing_models = []
+        if not mask_model_path.exists():
+            missing_models.append("mask_generator.pth")
+        if not residue_model_path.exists():
+            missing_models.append("residue_predictor.pth")
+        return False, f"❌ Не найдены модели: {', '.join(missing_models)}"
 
 # Проверяем модель при запуске
 model_available, model_message = check_model_exists()
@@ -160,9 +167,9 @@ else:
     <div class="model-status-warning">
         ⚠️ Метод "Fast Soft Color Segmentation" будет недоступен без модели.<br>
         <strong>Чтобы использовать этот метод:</strong><br>
-        1. Скачайте модель из оригинального репозитория<br>
+        1. Скачайте модели из оригинального репозитория<br>
         2. Создайте папку <code>model/</code> в этой директории<br>
-        3. Положите файл <code>mask_generator7.pth</code> в папку <code>model/</code><br>
+        3. Положите файлы <code>mask_generator.pth</code> и <code>residue_predictor.pth</code> в папку <code>model/</code><br>
         4. Перезапустите приложение<br>
         <em>Метод K-means работает без модели.</em>
     </div>
@@ -197,45 +204,11 @@ if 'selected_method' not in st.session_state:
 if 'combined_preview' not in st.session_state:
     st.session_state.combined_preview = None
 
-# ==================== КЛАССЫ ДЛЯ МЕТОДА DECOMPOSE ====================
+# ==================== НОВЫЕ КЛАССЫ ДЛЯ ПОЛНОЙ РЕАЛИЗАЦИИ FSCS ====================
 
-class _MyDataset(torch.utils.data.Dataset):
-    def __init__(self, img, num_primary_color, palette):
-        self.img = img.convert("RGB")
-        self.palette_list = palette.reshape(-1, num_primary_color * 3)
-        self.num_primary_color = num_primary_color
-
-    def __getitem__(self, index):
-        np_img = np.array(self.img)
-        np_img = np_img.transpose((2, 0, 1))
-        target_img = np_img / 255  # 0~1
-
-        # select primary_color
-        primary_color_layers = self._make_primary_color_layers(
-            self.palette_list[index], target_img
-        )
-
-        # to Tensor
-        target_img = torch.from_numpy(target_img.astype(np.float32))
-        primary_color_layers = torch.from_numpy(primary_color_layers.astype(np.float32))
-
-        return target_img, primary_color_layers  # return torch.Tensor
-
-    def __len__(self):
-        return 1
-
-    def _make_primary_color_layers(self, palette_values, target_img):
-        primary_color = (
-            palette_values.reshape(self.num_primary_color, 3) / 255
-        )  # (ln, 3)
-        primary_color_layers = np.tile(
-            np.ones_like(target_img), (self.num_primary_color, 1, 1, 1)
-        ) * primary_color.reshape(self.num_primary_color, 3, 1, 1)
-        return primary_color_layers
-
-class _MaskGeneratorModel(nn.Module):
+class MaskGenerator(nn.Module):
     def __init__(self, num_primary_color):
-        super(_MaskGeneratorModel, self).__init__()
+        super(MaskGenerator, self).__init__()
         in_dim = 3 + num_primary_color * 3  # ex. 21 ch (= 3 + 6 * 3)
         out_dim = num_primary_color  # num_out_layers is the same as num_primary_color.
 
@@ -304,7 +277,79 @@ class _MaskGeneratorModel(nn.Module):
 
         return torch.sigmoid(self.conv5(h7))  # box constraint for alpha layers
 
-# ==================== ФУНКЦИИ ДЛЯ МЕТОДА DECOMPOSE ====================
+
+class ResiduePredictor(nn.Module):
+    def __init__(self, num_primary_color):
+        super(ResiduePredictor, self).__init__()
+        in_dim = 3 + num_primary_color * 4  # ex. 31 ch (= 3 + 7 * 4)
+        out_dim = num_primary_color * 3  # num_out_layers is the same as num_primary_color.
+
+        self.conv1 = nn.Conv2d(
+            in_dim, in_dim * 2, kernel_size=3, stride=2, padding=1, bias=False
+        )
+        self.conv2 = nn.Conv2d(
+            in_dim * 2, in_dim * 4, kernel_size=3, stride=2, padding=1, bias=False
+        )
+        self.conv3 = nn.Conv2d(
+            in_dim * 4, in_dim * 8, kernel_size=3, stride=2, padding=1, bias=False
+        )
+        self.deconv1 = nn.ConvTranspose2d(
+            in_dim * 8,
+            in_dim * 4,
+            kernel_size=3,
+            stride=2,
+            padding=1,
+            bias=False,
+            output_padding=1,
+        )
+        self.deconv2 = nn.ConvTranspose2d(
+            in_dim * 8,
+            in_dim * 2,
+            kernel_size=3,
+            stride=2,
+            padding=1,
+            bias=False,
+            output_padding=1,
+        )
+        self.deconv3 = nn.ConvTranspose2d(
+            in_dim * 4,
+            in_dim * 2,
+            kernel_size=3,
+            stride=2,
+            padding=1,
+            bias=False,
+            output_padding=1,
+        )
+        self.conv4 = nn.Conv2d(
+            in_dim * 2 + 3, in_dim, kernel_size=3, stride=1, padding=1
+        )
+        self.conv5 = nn.Conv2d(in_dim, out_dim, kernel_size=3, stride=1, padding=1)
+
+        self.bn1 = nn.BatchNorm2d(in_dim * 2)
+        self.bn2 = nn.BatchNorm2d(in_dim * 4)
+        self.bn3 = nn.BatchNorm2d(in_dim * 8)
+        self.bnde1 = nn.BatchNorm2d(in_dim * 4)
+        self.bnde2 = nn.BatchNorm2d(in_dim * 2)
+        self.bnde3 = nn.BatchNorm2d(in_dim * 2)
+        self.bn4 = nn.BatchNorm2d(in_dim)
+
+    def forward(self, target_img, mono_color_layers_pack):
+        x = torch.cat((target_img, mono_color_layers_pack), dim=1)
+
+        h1 = self.bn1(F.relu(self.conv1(x)))  # *2
+        h2 = self.bn2(F.relu(self.conv2(h1)))  # *4
+        h3 = self.bn3(F.relu(self.conv3(h2)))  # *8
+        h4 = self.bnde1(F.relu(self.deconv1(h3)))  # *4
+        h4 = torch.cat((h4, h2), 1)  # *8
+        h5 = self.bnde2(F.relu(self.deconv2(h4)))  # *2
+        h5 = torch.cat((h5, h1), 1)  # *4
+        h6 = self.bnde3(F.relu(self.deconv3(h5)))  # *2
+        h6 = torch.cat((h6, target_img), 1)  # *2+3
+        h7 = self.bn4(F.relu(self.conv4(h6)))
+
+        return torch.tanh(self.conv5(h7))  # -1 ~ +1
+
+# ==================== ФУНКЦИИ ДЛЯ ПОЛНОЙ РЕАЛИЗАЦИИ FSCS ====================
 
 def get_dominant_colors(img: Image.Image, num_colors: int) -> list[tuple]:
     """
@@ -336,20 +381,76 @@ def get_dominant_colors(img: Image.Image, num_colors: int) -> list[tuple]:
     # Конвертируем в список кортежей
     return [tuple(color) for color in sorted_colors]
 
-def decompose_fast_soft_color(
+class MyDataset(torch.utils.data.Dataset):
+    def __init__(self, img, num_primary_color, palette):
+        self.img = img.convert("RGB")
+        self.palette_list = palette.reshape(-1, num_primary_color * 3)
+        self.num_primary_color = num_primary_color
+
+    def __getitem__(self, index):
+        np_img = np.array(self.img)
+        np_img = np_img.transpose((2, 0, 1))
+        target_img = np_img / 255  # 0~1
+
+        # select primary_color
+        primary_color_layers = self._make_primary_color_layers(
+            self.palette_list[index], target_img
+        )
+
+        # to Tensor
+        target_img = torch.from_numpy(target_img.astype(np.float32))
+        primary_color_layers = torch.from_numpy(primary_color_layers.astype(np.float32))
+
+        return target_img, primary_color_layers  # return torch.Tensor
+
+    def __len__(self):
+        return 1
+
+    def _make_primary_color_layers(self, palette_values, target_img):
+        primary_color = (
+            palette_values.reshape(self.num_primary_color, 3) / 255
+        )  # (ln, 3)
+        primary_color_layers = np.tile(
+            np.ones_like(target_img), (self.num_primary_color, 1, 1, 1)
+        ) * primary_color.reshape(self.num_primary_color, 3, 1, 1)
+        return primary_color_layers
+
+def replace_color(primary_color_layers, manual_colors):
+    temp_primary_color_layers = primary_color_layers.clone()
+    for layer in range(len(manual_colors)):
+        for color in range(3):
+                temp_primary_color_layers[:,layer,color,:,:].fill_(manual_colors[layer][color])
+    return temp_primary_color_layers
+
+def cut_edge(target_img, resize_scale_factor=1.0):
+    target_img = F.interpolate(target_img, scale_factor=resize_scale_factor, mode='area')
+    h = target_img.size(2)
+    w = target_img.size(3)
+    h = h - (h % 8)
+    w = w - (w % 8)
+    target_img = target_img[:,:,:h,:w]
+    return target_img
+
+def alpha_normalize(alpha_layers):
+    # constraint (sum = 1)
+    # layersの状態で受け取り，その形で返す. bn, ln, 1, h, w
+    return alpha_layers / (alpha_layers.sum(dim=1, keepdim=True) + 1e-8)
+
+def decompose_fast_soft_color_full(
     input_image: Image.Image,
     num_colors: int = 7,
     palette: list[tuple] = None,
-    resize_scale_factor: float = 1.0
+    resize_scale_factor: float = 1.0,
+    device: str = "cpu"
 ) -> list[Image.Image]:
     """
-    Функция для разложения изображения на цветовые слои с использованием нейронной сети
-    Поддерживает от 2 до 8 цветов
+    Полная реализация Fast Soft Color Segmentation как в inference.ipynb
+    с использованием mask_generator и residue_predictor
     """
     layersRGBA = []
     
     if not model_available:
-        st.error("Модель не найдена. Невозможно выполнить метод Decompose.")
+        st.error("Модели не найдены. Невозможно выполнить метод Fast Soft Color Segmentation.")
         return []
     
     if num_colors < 2 or num_colors > 8:
@@ -372,7 +473,8 @@ def decompose_fast_soft_color(
     palette = np.array(palette)
     
     try:
-        test_dataset = _MyDataset(input_image, num_colors, palette)
+        # Создаем датасет
+        test_dataset = MyDataset(input_image, num_colors, palette)
         test_loader = torch.utils.data.DataLoader(
             test_dataset,
             batch_size=1,
@@ -380,33 +482,20 @@ def decompose_fast_soft_color(
             num_workers=0,
         )
         
-        cpu = torch.device("cpu")
+        # Определяем устройство
+        device = torch.device(device)
         
-        # Загрузка модели
-        mask_generator = _MaskGeneratorModel(num_colors).to(cpu)
+        # Определяем модели
+        mask_generator = MaskGenerator(num_colors).to(device)
+        residue_predictor = ResiduePredictor(num_colors).to(device)
         
-        # Загрузка весов модели
-        model_path = Path("model/mask_generator7.pth")
-        mask_generator.load_state_dict(
-            torch.load(model_path, map_location=torch.device("cpu"))
-        )
+        # Загружаем веса моделей
+        mask_generator.load_state_dict(torch.load("model/mask_generator.pth", map_location=device))
+        residue_predictor.load_state_dict(torch.load("model/residue_predictor.pth", map_location=device))
         
         # Режим оценки
         mask_generator.eval()
-        
-        def cut_edge(target_img: torch.tensor) -> torch.tensor:
-            target_img = F.interpolate(
-                target_img, scale_factor=resize_scale_factor, mode="area"
-            )
-            h = target_img.size(2)
-            w = target_img.size(3)
-            h = h - (h % 8)
-            w = w - (w % 8)
-            target_img = target_img[:, :, :h, :w]
-            return target_img
-        
-        def alpha_normalize(alpha_layers: torch.Tensor) -> torch.Tensor:
-            return alpha_layers / (alpha_layers.sum(dim=1, keepdim=True) + 1e-8)
+        residue_predictor.eval()
         
         def normalize_to_0_255(nd: np.array):
             nd = (nd * 255) + 0.5
@@ -418,39 +507,78 @@ def decompose_fast_soft_color(
                 if batch_idx != 0:
                     continue
                 
-                target_img = cut_edge(target_img)
-                target_img = target_img.to("cpu")
-                primary_color_layers = primary_color_layers.to("cpu")
+                # Подготовка входных данных как в inference.ipynb
+                target_img = cut_edge(target_img, resize_scale_factor)
+                target_img = target_img.to(device)
+                primary_color_layers = primary_color_layers.to(device)
+                
+                # Заменяем цвета на ручные (если нужно)
+                manual_colors_norm = palette / 255.0
+                primary_color_layers = replace_color(primary_color_layers, manual_colors_norm)
+                
+                # Подготовка упакованных данных
                 primary_color_pack = primary_color_layers.view(
-                    primary_color_layers.size(0),
-                    -1,
-                    primary_color_layers.size(3),
-                    primary_color_layers.size(4),
+                    primary_color_layers.size(0), 
+                    -1, 
+                    primary_color_layers.size(3), 
+                    primary_color_layers.size(4)
                 )
-                primary_color_pack = cut_edge(primary_color_pack)
+                primary_color_pack = cut_edge(primary_color_pack, resize_scale_factor)
                 primary_color_layers = primary_color_pack.view(
                     primary_color_pack.size(0),
-                    -1,
-                    3,
-                    primary_color_pack.size(2),
-                    primary_color_pack.size(3),
+                    -1, 
+                    3, 
+                    primary_color_pack.size(2), 
+                    primary_color_pack.size(3)
                 )
+                
+                # Предсказание альфа слоев
                 pred_alpha_layers_pack = mask_generator(target_img, primary_color_pack)
                 pred_alpha_layers = pred_alpha_layers_pack.view(
-                    target_img.size(0), -1, 1, target_img.size(2), target_img.size(3)
+                    target_img.size(0), 
+                    -1, 
+                    1, 
+                    target_img.size(2), 
+                    target_img.size(3)
                 )
                 
+                # Обработка альфа слоев
                 processed_alpha_layers = alpha_normalize(pred_alpha_layers)
+                
+                # Можно добавить дополнительные обработки здесь:
+                # processed_alpha_layers = proc_guidedfilter(processed_alpha_layers, target_img) # Option
                 processed_alpha_layers = alpha_normalize(processed_alpha_layers)  # Двойная нормализация
                 
-                mono_RGBA_layers = torch.cat(
-                    (primary_color_layers, processed_alpha_layers), dim=2
-                )  # out: bn, ln, 4, h, w
+                # Создание монохромных слоев RGBA
+                mono_color_layers = torch.cat((primary_color_layers, processed_alpha_layers), 2)
+                mono_color_layers_pack = mono_color_layers.view(
+                    target_img.size(0), 
+                    -1, 
+                    target_img.size(2), 
+                    target_img.size(3)
+                )
                 
-                # Преобразование в изображения PIL
-                mono_RGBA_layers = mono_RGBA_layers[0]  # ln, 4. h, w
-                for i in range(len(mono_RGBA_layers)):
-                    im = mono_RGBA_layers[i, :, :, :].numpy()
+                # Предсказание остатков
+                residue_pack = residue_predictor(target_img, mono_color_layers_pack)
+                residue = residue_pack.view(
+                    target_img.size(0), 
+                    -1, 
+                    3, 
+                    target_img.size(2), 
+                    target_img.size(3)
+                )
+                
+                # Получение окончательных RGB слоев
+                pred_unmixed_rgb_layers = torch.clamp((primary_color_layers + residue), min=0., max=1.0)
+                
+                # Создание окончательных RGBA слоев
+                RGBA_layers = torch.cat((pred_unmixed_rgb_layers, processed_alpha_layers), dim=2)
+                
+                # Преобразование в PIL изображения
+                RGBA_layers = RGBA_layers[0]  # ln, 4, h, w
+                
+                for i in range(len(RGBA_layers)):
+                    im = RGBA_layers[i, :, :, :].cpu().numpy()
                     im = im.transpose((1, 2, 0))
                     im = normalize_to_0_255(im)
                     layersRGBA.append(Image.fromarray(im))
@@ -460,7 +588,7 @@ def decompose_fast_soft_color(
         return layersRGBA
     
     except Exception as e:
-        st.error(f"Ошибка при выполнении метода Decompose: {str(e)}")
+        st.error(f"Ошибка при выполнении метода Fast Soft Color Segmentation: {str(e)}")
         import traceback
         st.code(traceback.format_exc())
         return []
@@ -692,7 +820,7 @@ with st.sidebar:
         st.markdown("<h4>🎯 Выберите метод</h4>", unsafe_allow_html=True)
         methods = ["K-средних кластеризация"]
         if model_available:
-            methods.append("Fast Soft Color Segmentation (нейронная сеть)")
+            methods.append("Fast Soft Color Segmentation (полная реализация)")
         
         selected_method = st.selectbox("Метод разделения", methods, 
                                       label_visibility="collapsed")
@@ -711,11 +839,19 @@ with st.sidebar:
         bg_color_rgb = tuple(int(bg_color.lstrip('#')[i:i+2], 16) for i in (0, 2, 4))
         
         # Дополнительные настройки для нейронной сети
-        if selected_method == "Fast Soft Color Segmentation (нейронная сеть)" and model_available:
+        if selected_method == "Fast Soft Color Segmentation (полная реализация)" and model_available:
             st.markdown("<h4>⚡ Настройки нейронной сети</h4>", unsafe_allow_html=True)
             resize_factor = st.slider("Масштаб", 0.5, 2.0, 1.0, 0.1,
                                      help="Коэффициент изменения размера для обработки",
                                      label_visibility="collapsed")
+            
+            # Выбор устройства
+            device_option = st.selectbox(
+                "Устройство для обработки",
+                ["cpu", "cuda"],
+                index=0,
+                help="Выберите устройство для обработки (cuda для GPU)"
+            )
         
         # Дополнительные опции
         with st.expander("🛠️ Дополнительные настройки", expanded=False):
@@ -803,21 +939,25 @@ if st.session_state.uploaded_file is not None:
                             bg_color=bg_color_rgb
                         )
                     
-                    elif selected_method == "Fast Soft Color Segmentation (нейронная сеть)":
-                        # Используем нейронную сеть
+                    elif selected_method == "Fast Soft Color Segmentation (полная реализация)":
+                        # Используем полную реализацию нейронной сети
                         if not model_available:
-                            st.error("Модель не найдена. Используйте метод K-means или загрузите модель.")
+                            st.error("Модели не найдены. Используйте метод K-means или загрузите модели.")
                             color_layers, color_info = [], []
                         else:
                             # Получаем доминирующие цвета для палитры
                             palette_colors = get_dominant_colors(image, num_colors)
                             
-                            # Вызываем функцию decompose
-                            decompose_layers = decompose_fast_soft_color(
+                            # Определяем устройство
+                            device = "cuda" if torch.cuda.is_available() and 'device_option' in locals() and device_option == "cuda" else "cpu"
+                            
+                            # Вызываем полную функцию decompose
+                            decompose_layers = decompose_fast_soft_color_full(
                                 image,
                                 num_colors=num_colors,
                                 palette=palette_colors,
-                                resize_scale_factor=resize_factor if 'resize_factor' in locals() else 1.0
+                                resize_scale_factor=resize_factor if 'resize_factor' in locals() else 1.0,
+                                device=device
                             )
                             
                             if decompose_layers:
@@ -984,7 +1124,7 @@ if st.session_state.uploaded_file is not None:
                 if st.session_state.layer_visibility[idx]:
                     layer = color_layers[idx]
                     
-                    # ИЗМЕНЕНИЕ: Проверяем размеры и изменяем при необходимости
+                    # Проверяем размеры и изменяем при необходимости
                     if layer.shape != combined.shape:
                         layer = resize_layer_to_match(layer, combined.shape)
                     
@@ -1016,7 +1156,7 @@ if st.session_state.uploaded_file is not None:
                 
                 for i, layer in enumerate(color_layers):
                     if st.session_state.layer_visibility[i]:
-                        # ИЗМЕНЕНИЕ: Проверяем размеры
+                        # Проверяем размеры
                         if layer.shape[:2] != combined_bw_mask.shape:
                             layer_resized = resize_layer_to_match(layer, combined_bw_mask.shape[:2] + (3,))
                         else:
@@ -1166,27 +1306,29 @@ with col_method2:
     if model_available:
         st.markdown("""
         <div class="method-card">
-            <h4>⚡ Fast Soft Color Segmentation</h4>
-            <p><strong>Описание:</strong> Нейронная сеть для продвинутого разделения цветов.</p>
+            <h4>⚡ Fast Soft Color Segmentation (полная реализация)</h4>
+            <p><strong>Описание:</strong> Полная реализация нейронной сети из оригинальной статьи.</p>
             <p><strong>Преимущества:</strong></p>
             <ul>
-                <li>Создает слои с прозрачностью</li>
-                <li>Сохраняет плавные переходы</li>
-                <li>Лучше работает с градиентами</li>
+                <li>Использует обе нейронные сети (mask_generator + residue_predictor)</li>
+                <li>Создает слои с прозрачностью и плавными переходами</li>
+                <li>Высокая точность цветопередачи</li>
+                <li>Лучше работает с градиентами и сложными текстурами</li>
             </ul>
-            <p><strong>Идеально для:</strong> Фотографии, градиенты, сложные текстуры</p>
+            <p><strong>Идеально для:</strong> Фотографии, градиенты, сложные текстуры, художественные работы</p>
         </div>
         """, unsafe_allow_html=True)
     else:
         st.markdown("""
         <div class="method-card" style="border-left-color: #ffc107;">
-            <h4>⚡ Fast Soft Color Segmentation</h4>
-            <p><strong>Статус:</strong> 🔒 Требуется модель</p>
-            <p>Для использования этого метода необходимо скачать файл модели и поместить его в папку <code>model/</code></p>
+            <h4>⚡ Fast Soft Color Segmentation (полная реализация)</h4>
+            <p><strong>Статус:</strong> 🔒 Требуются модели</p>
+            <p>Для использования этого метода необходимо скачать файлы моделей и поместить их в папку <code>model/</code></p>
             <p><strong>Преимущества метода:</strong></p>
             <ul>
-                <li>Нейронная сеть для точного разделения</li>
-                <li>Слои с альфа-каналами</li>
+                <li>Полная реализация нейронной сети из статьи</li>
+                <li>Высокая точность разделения цветов</li>
+                <li>Слои с альфа-каналами и плавными переходами</li>
                 <li>Идеально для сложных изображений</li>
             </ul>
         </div>
