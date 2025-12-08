@@ -1188,4 +1188,4 @@ try:
     
     # Проверка PyTorch
     torch_version = torch.__version__
-    cuda_available = torch.cuda.is_available()я
+    cuda_available = torch.cuda.is_available()
