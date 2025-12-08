@@ -9,17 +9,13 @@ import tempfile
 import os
 import zipfile
 from collections import Counter
-import pantone_colors as pantone
-from pantone_tab import pantone_extraction_tab
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-import sys
 from pathlib import Path
-from pyora import Project
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -27,20 +23,13 @@ warnings.filterwarnings('ignore')
 
 def check_model_exists():
     """Проверяет наличие модели в папке model/"""
-    mask_model_path = Path("model/mask_generator.pth")
-    residue_model_path = Path("model/residue_predictor.pth")
+    model_path = Path("model/mask_generator.pth")
     
-    if mask_model_path.exists() and residue_model_path.exists():
-        mask_size = mask_model_path.stat().st_size / (1024 * 1024)  # MB
-        residue_size = residue_model_path.stat().st_size / (1024 * 1024)  # MB
-        return True, f"✅ Модели найдены:\n- mask_generator.pth ({mask_size:.2f} MB)\n- residue_predictor.pth ({residue_size:.2f} MB)"
+    if model_path.exists():
+        file_size = model_path.stat().st_size / (1024 * 1024)  # MB
+        return True, f"✅ Модель найдена: {model_path} ({file_size:.2f} MB)"
     else:
-        missing_models = []
-        if not mask_model_path.exists():
-            missing_models.append("mask_generator.pth")
-        if not residue_model_path.exists():
-            missing_models.append("residue_predictor.pth")
-        return False, f"❌ Не найдены модели: {', '.join(missing_models)}"
+        return False, "❌ Модель не найдена в папке model/"
 
 # Проверяем модель при запуске
 model_available, model_message = check_model_exists()
@@ -91,6 +80,11 @@ st.markdown("""
         border-radius: 5px;
         padding: 10px 20px;
         border: none;
+        transition: all 0.3s ease;
+    }
+    .stButton button:hover {
+        background-color: #003d82;
+        transform: translateY(-2px);
     }
     .color-chip {
         display: inline-block;
@@ -100,6 +94,7 @@ st.markdown("""
         border: 2px solid #000;
         border-radius: 5px;
         vertical-align: middle;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
     }
     .method-card {
         background-color: #f8f9fa;
@@ -107,6 +102,7 @@ st.markdown("""
         padding: 20px;
         margin-bottom: 20px;
         border-left: 5px solid #0056b3;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.05);
     }
     .model-status-success {
         background-color: #d4edda;
@@ -115,6 +111,7 @@ st.markdown("""
         border-radius: 8px;
         border: 2px solid #c3e6cb;
         margin-bottom: 20px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.05);
     }
     .model-status-warning {
         background-color: #fff3cd;
@@ -123,6 +120,7 @@ st.markdown("""
         border-radius: 8px;
         border: 2px solid #ffeaa7;
         margin-bottom: 20px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.05);
     }
     .upload-section {
         background-color: #e7f3ff;
@@ -131,6 +129,11 @@ st.markdown("""
         border: 3px dashed #0056b3;
         text-align: center;
         margin-bottom: 25px;
+        transition: all 0.3s ease;
+    }
+    .upload-section:hover {
+        background-color: #d0e7ff;
+        border-color: #003d82;
     }
     .layer-card {
         background-color: #ffffff;
@@ -139,18 +142,50 @@ st.markdown("""
         margin-bottom: 20px;
         box-shadow: 0 4px 6px rgba(0,0,0,0.1);
         border: 1px solid #e0e0e0;
+        transition: all 0.3s ease;
+    }
+    .layer-card:hover {
+        transform: translateY(-5px);
+        box-shadow: 0 8px 15px rgba(0,0,0,0.1);
     }
     .preview-container {
         background-color: #f5f5f5;
         padding: 20px;
         border-radius: 10px;
         margin-bottom: 20px;
+        border: 1px solid #ddd;
     }
     .tab-content {
         padding: 20px;
         background-color: white;
         border-radius: 10px;
         border: 1px solid #ddd;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+    }
+    .color-palette {
+        display: flex;
+        gap: 5px;
+        margin: 10px 0;
+        padding: 10px;
+        background: #f8f9fa;
+        border-radius: 5px;
+    }
+    .color-item {
+        width: 30px;
+        height: 30px;
+        border-radius: 4px;
+        border: 1px solid #ccc;
+        cursor: pointer;
+        transition: transform 0.2s;
+    }
+    .color-item:hover {
+        transform: scale(1.1);
+    }
+    .progress-bar {
+        height: 4px;
+        background: linear-gradient(90deg, #0056b3, #00b3b3);
+        border-radius: 2px;
+        margin: 10px 0;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -167,9 +202,9 @@ else:
     <div class="model-status-warning">
         ⚠️ Метод "Fast Soft Color Segmentation" будет недоступен без модели.<br>
         <strong>Чтобы использовать этот метод:</strong><br>
-        1. Скачайте модели из оригинального репозитория<br>
+        1. Скачайте модель из оригинального репозитория<br>
         2. Создайте папку <code>model/</code> в этой директории<br>
-        3. Положите файлы <code>mask_generator.pth</code> и <code>residue_predictor.pth</code> в папку <code>model/</code><br>
+        3. Положите файл <code>mask_generator.pth</code> в папку <code>model/</code><br>
         4. Перезапустите приложение<br>
         <em>Метод K-means работает без модели.</em>
     </div>
@@ -204,534 +239,230 @@ if 'selected_method' not in st.session_state:
 if 'combined_preview' not in st.session_state:
     st.session_state.combined_preview = None
 
-# ==================== НОВЫЕ КЛАССЫ ДЛЯ ПОЛНОЙ РЕАЛИЗАЦИИ FSCS ====================
+if 'palette_colors' not in st.session_state:
+    st.session_state.palette_colors = None
 
-class MaskGenerator(nn.Module):
+if 'processing_done' not in st.session_state:
+    st.session_state.processing_done = False
+
+# ==================== КЛАССЫ ДЛЯ МЕТОДА DECOMPOSE ====================
+
+class SimpleMaskGenerator(nn.Module):
+    """Упрощенная версия MaskGenerator для работы с произвольным количеством цветов"""
     def __init__(self, num_primary_color):
-        super(MaskGenerator, self).__init__()
-        in_dim = 3 + num_primary_color * 3  # ex. 21 ch (= 3 + 6 * 3)
-        out_dim = num_primary_color  # num_out_layers is the same as num_primary_color.
+        super(SimpleMaskGenerator, self).__init__()
+        in_dim = 3 + num_primary_color * 3  # вход: изображение + палитра
+        out_dim = num_primary_color  # выход: альфа-маски для каждого цвета
 
-        self.conv1 = nn.Conv2d(
-            in_dim, in_dim * 2, kernel_size=3, stride=2, padding=1, bias=False
+        # Энкодер
+        self.encoder1 = nn.Sequential(
+            nn.Conv2d(in_dim, 64, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True)
         )
-        self.conv2 = nn.Conv2d(
-            in_dim * 2, in_dim * 4, kernel_size=3, stride=2, padding=1, bias=False
+        self.encoder2 = nn.Sequential(
+            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True)
         )
-        self.conv3 = nn.Conv2d(
-            in_dim * 4, in_dim * 8, kernel_size=3, stride=2, padding=1, bias=False
+        self.encoder3 = nn.Sequential(
+            nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True)
         )
-        self.deconv1 = nn.ConvTranspose2d(
-            in_dim * 8,
-            in_dim * 4,
-            kernel_size=3,
-            stride=2,
-            padding=1,
-            bias=False,
-            output_padding=1,
+        
+        # Декодер
+        self.decoder1 = nn.Sequential(
+            nn.ConvTranspose2d(256, 128, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True)
         )
-        self.deconv2 = nn.ConvTranspose2d(
-            in_dim * 8,
-            in_dim * 2,
-            kernel_size=3,
-            stride=2,
-            padding=1,
-            bias=False,
-            output_padding=1,
+        self.decoder2 = nn.Sequential(
+            nn.ConvTranspose2d(256, 64, kernel_size=4, stride=2, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True)
         )
-        self.deconv3 = nn.ConvTranspose2d(
-            in_dim * 4,
-            in_dim * 2,
-            kernel_size=3,
-            stride=2,
-            padding=1,
-            bias=False,
-            output_padding=1,
+        
+        # Финальный слой
+        self.final = nn.Sequential(
+            nn.Conv2d(128, 64, kernel_size=3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(64, out_dim, kernel_size=1),
+            nn.Sigmoid()
         )
-        self.conv4 = nn.Conv2d(
-            in_dim * 2 + 3, in_dim, kernel_size=3, stride=1, padding=1
-        )
-        self.conv5 = nn.Conv2d(in_dim, out_dim, kernel_size=3, stride=1, padding=1)
+        
+    def forward(self, x):
+        # Энкодер
+        enc1 = self.encoder1(x)
+        enc2 = self.encoder2(enc1)
+        enc3 = self.encoder3(enc2)
+        
+        # Декодер с пропусками
+        dec1 = self.decoder1(enc3)
+        dec1 = torch.cat([dec1, enc2], dim=1)
+        
+        dec2 = self.decoder2(dec1)
+        dec2 = torch.cat([dec2, enc1], dim=1)
+        
+        # Финальный выход
+        out = self.final(dec2)
+        return out
 
-        self.bn1 = nn.BatchNorm2d(in_dim * 2)
-        self.bn2 = nn.BatchNorm2d(in_dim * 4)
-        self.bn3 = nn.BatchNorm2d(in_dim * 8)
-        self.bnde1 = nn.BatchNorm2d(in_dim * 4)
-        self.bnde2 = nn.BatchNorm2d(in_dim * 2)
-        self.bnde3 = nn.BatchNorm2d(in_dim * 2)
-        self.bn4 = nn.BatchNorm2d(in_dim)
-
-    def forward(self, target_img, primary_color_pack):
-        x = torch.cat((target_img, primary_color_pack), dim=1)
-
-        h1 = self.bn1(F.relu(self.conv1(x)))  # *2
-        h2 = self.bn2(F.relu(self.conv2(h1)))  # *4
-        h3 = self.bn3(F.relu(self.conv3(h2)))  # *8
-        h4 = self.bnde1(F.relu(self.deconv1(h3)))  # *4
-        h4 = torch.cat((h4, h2), 1)  # *8
-        h5 = self.bnde2(F.relu(self.deconv2(h4)))  # *2
-        h5 = torch.cat((h5, h1), 1)  # *4
-        h6 = self.bnde3(F.relu(self.deconv3(h5)))  # *2
-        h6 = torch.cat((h6, target_img), 1)  # *2+3
-        h7 = self.bn4(F.relu(self.conv4(h6)))
-
-        return torch.sigmoid(self.conv5(h7))  # box constraint for alpha layers
-
-
-class ResiduePredictor(nn.Module):
-    def __init__(self, num_primary_color):
-        super(ResiduePredictor, self).__init__()
-        in_dim = 3 + num_primary_color * 4  # ex. 31 ch (= 3 + 7 * 4)
-        out_dim = num_primary_color * 3  # num_out_layers is the same as num_primary_color.
-
-        self.conv1 = nn.Conv2d(
-            in_dim, in_dim * 2, kernel_size=3, stride=2, padding=1, bias=False
-        )
-        self.conv2 = nn.Conv2d(
-            in_dim * 2, in_dim * 4, kernel_size=3, stride=2, padding=1, bias=False
-        )
-        self.conv3 = nn.Conv2d(
-            in_dim * 4, in_dim * 8, kernel_size=3, stride=2, padding=1, bias=False
-        )
-        self.deconv1 = nn.ConvTranspose2d(
-            in_dim * 8,
-            in_dim * 4,
-            kernel_size=3,
-            stride=2,
-            padding=1,
-            bias=False,
-            output_padding=1,
-        )
-        self.deconv2 = nn.ConvTranspose2d(
-            in_dim * 8,
-            in_dim * 2,
-            kernel_size=3,
-            stride=2,
-            padding=1,
-            bias=False,
-            output_padding=1,
-        )
-        self.deconv3 = nn.ConvTranspose2d(
-            in_dim * 4,
-            in_dim * 2,
-            kernel_size=3,
-            stride=2,
-            padding=1,
-            bias=False,
-            output_padding=1,
-        )
-        self.conv4 = nn.Conv2d(
-            in_dim * 2 + 3, in_dim, kernel_size=3, stride=1, padding=1
-        )
-        self.conv5 = nn.Conv2d(in_dim, out_dim, kernel_size=3, stride=1, padding=1)
-
-        self.bn1 = nn.BatchNorm2d(in_dim * 2)
-        self.bn2 = nn.BatchNorm2d(in_dim * 4)
-        self.bn3 = nn.BatchNorm2d(in_dim * 8)
-        self.bnde1 = nn.BatchNorm2d(in_dim * 4)
-        self.bnde2 = nn.BatchNorm2d(in_dim * 2)
-        self.bnde3 = nn.BatchNorm2d(in_dim * 2)
-        self.bn4 = nn.BatchNorm2d(in_dim)
-
-    def forward(self, target_img, mono_color_layers_pack):
-        x = torch.cat((target_img, mono_color_layers_pack), dim=1)
-
-        h1 = self.bn1(F.relu(self.conv1(x)))  # *2
-        h2 = self.bn2(F.relu(self.conv2(h1)))  # *4
-        h3 = self.bn3(F.relu(self.conv3(h2)))  # *8
-        h4 = self.bnde1(F.relu(self.deconv1(h3)))  # *4
-        h4 = torch.cat((h4, h2), 1)  # *8
-        h5 = self.bnde2(F.relu(self.deconv2(h4)))  # *2
-        h5 = torch.cat((h5, h1), 1)  # *4
-        h6 = self.bnde3(F.relu(self.deconv3(h5)))  # *2
-        h6 = torch.cat((h6, target_img), 1)  # *2+3
-        h7 = self.bn4(F.relu(self.conv4(h6)))
-
-        return torch.tanh(self.conv5(h7))  # -1 ~ +1
-
-# ==================== ФУНКЦИИ ДЛЯ ПОЛНОЙ РЕАЛИЗАЦИИ FSCS ====================
+# ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 
 def get_dominant_colors(img: Image.Image, num_colors: int) -> list[tuple]:
     """
     Получение доминирующих цветов из изображения с использованием K-means
     """
-    # Конвертируем изображение в массив numpy
-    img_array = np.array(img)
-    
-    # Если изображение RGBA, конвертируем в RGB
-    if img.mode == "RGBA":
-        img_array = cv2.cvtColor(img_array, cv2.COLOR_RGBA2RGB)
-    
-    # Преобразуем изображение в формат для K-means
-    pixels = img_array.reshape(-1, 3)
-    
-    # Используем K-means для нахождения доминирующих цветов
-    kmeans = KMeans(n_clusters=num_colors, random_state=42, n_init=10)
-    kmeans.fit(pixels)
-    
-    # Получаем центры кластеров (доминирующие цвета)
-    colors = kmeans.cluster_centers_.astype(int)
-    
-    # Сортируем цвета по частоте
-    labels = kmeans.labels_
-    counts = np.bincount(labels)
-    sorted_indices = np.argsort(counts)[::-1]
-    sorted_colors = colors[sorted_indices]
-    
-    # Конвертируем в список кортежей
-    return [tuple(color) for color in sorted_colors]
-
-class MyDataset(torch.utils.data.Dataset):
-    def __init__(self, img, num_primary_color, palette):
-        self.img = img.convert("RGB")
-        self.palette_list = palette.reshape(-1, num_primary_color * 3)
-        self.num_primary_color = num_primary_color
-
-    def __getitem__(self, index):
-        np_img = np.array(self.img)
-        np_img = np_img.transpose((2, 0, 1))
-        target_img = np_img / 255  # 0~1
-
-        # select primary_color
-        primary_color_layers = self._make_primary_color_layers(
-            self.palette_list[index], target_img
-        )
-
-        # to Tensor
-        target_img = torch.from_numpy(target_img.astype(np.float32))
-        primary_color_layers = torch.from_numpy(primary_color_layers.astype(np.float32))
-
-        return target_img, primary_color_layers  # return torch.Tensor
-
-    def __len__(self):
-        return 1
-
-    def _make_primary_color_layers(self, palette_values, target_img):
-        primary_color = (
-            palette_values.reshape(self.num_primary_color, 3) / 255
-        )  # (ln, 3)
-        primary_color_layers = np.tile(
-            np.ones_like(target_img), (self.num_primary_color, 1, 1, 1)
-        ) * primary_color.reshape(self.num_primary_color, 3, 1, 1)
-        return primary_color_layers
-
-def replace_color(primary_color_layers, manual_colors):
-    temp_primary_color_layers = primary_color_layers.clone()
-    for layer in range(len(manual_colors)):
-        for color in range(3):
-                temp_primary_color_layers[:,layer,color,:,:].fill_(manual_colors[layer][color])
-    return temp_primary_color_layers
-
-def cut_edge(target_img, resize_scale_factor=1.0):
-    target_img = F.interpolate(target_img, scale_factor=resize_scale_factor, mode='area')
-    h = target_img.size(2)
-    w = target_img.size(3)
-    h = h - (h % 8)
-    w = w - (w % 8)
-    target_img = target_img[:,:,:h,:w]
-    return target_img
-
-def alpha_normalize(alpha_layers):
-    # constraint (sum = 1)
-    # layersの状態で受け取り，その形で返す. bn, ln, 1, h, w
-    return alpha_layers / (alpha_layers.sum(dim=1, keepdim=True) + 1e-8)
-
-def decompose_fast_soft_color_full(
-    input_image: Image.Image,
-    num_colors: int = 7,
-    palette: list[tuple] = None,
-    resize_scale_factor: float = 1.0,
-    device: str = "cpu"
-) -> list[Image.Image]:
-    """
-    Полная реализация Fast Soft Color Segmentation как в inference.ipynb
-    с использованием mask_generator и residue_predictor
-    """
-    layersRGBA = []
-    
-    if not model_available:
-        st.error("Модели не найдены. Невозможно выполнить метод Fast Soft Color Segmentation.")
-        return []
-    
-    if num_colors < 2 or num_colors > 8:
-        st.error(f"Количество цветов должно быть от 2 до 8. Получено: {num_colors}")
-        return []
-    
-    # Преобразование изображения PIL в формат для обработки
-    if palette is None:
-        # Используем K-means для получения палитры
-        palette = get_dominant_colors(input_image, num_colors)
-    else:
-        # Если передана палитра, убедимся, что в ней правильное количество цветов
-        if len(palette) != num_colors:
-            # Если цветов меньше, добавим недостающие
-            while len(palette) < num_colors:
-                palette.append(palette[-1] if palette else (128, 128, 128))
-            # Если цветов больше, обрежем
-            palette = palette[:num_colors]
-    
-    palette = np.array(palette)
-    
     try:
-        # Создаем датасет
-        test_dataset = MyDataset(input_image, num_colors, palette)
-        test_loader = torch.utils.data.DataLoader(
-            test_dataset,
-            batch_size=1,
-            shuffle=False,
-            num_workers=0,
-        )
+        # Конвертируем изображение в массив numpy
+        img_array = np.array(img.convert("RGB"))
         
-        # Определяем устройство
-        device = torch.device(device)
+        # Преобразуем изображение в формат для K-means
+        pixels = img_array.reshape(-1, 3)
         
-        # Определяем модели
-        mask_generator = MaskGenerator(num_colors).to(device)
-        residue_predictor = ResiduePredictor(num_colors).to(device)
+        # Используем K-means для нахождения доминирующих цветов
+        kmeans = KMeans(n_clusters=num_colors, random_state=42, n_init=10, max_iter=300)
+        kmeans.fit(pixels)
         
-        # Загружаем веса моделей
-        mask_generator.load_state_dict(torch.load("model/mask_generator.pth", map_location=device))
-        residue_predictor.load_state_dict(torch.load("model/residue_predictor.pth", map_location=device))
+        # Получаем центры кластеров (доминирующие цвета)
+        colors = kmeans.cluster_centers_.astype(int)
         
-        # Режим оценки
-        mask_generator.eval()
-        residue_predictor.eval()
+        # Сортируем цвета по частоте
+        labels = kmeans.labels_
+        counts = np.bincount(labels)
+        sorted_indices = np.argsort(counts)[::-1]
+        sorted_colors = colors[sorted_indices]
         
-        def normalize_to_0_255(nd: np.array):
-            nd = (nd * 255) + 0.5
-            nd = np.clip(nd, 0, 255).astype("uint8")
-            return nd
-        
-        with torch.no_grad():
-            for batch_idx, (target_img, primary_color_layers) in enumerate(test_loader):
-                if batch_idx != 0:
-                    continue
-                
-                # Подготовка входных данных как в inference.ipynb
-                target_img = cut_edge(target_img, resize_scale_factor)
-                target_img = target_img.to(device)
-                primary_color_layers = primary_color_layers.to(device)
-                
-                # Заменяем цвета на ручные (если нужно)
-                manual_colors_norm = palette / 255.0
-                primary_color_layers = replace_color(primary_color_layers, manual_colors_norm)
-                
-                # Подготовка упакованных данных
-                primary_color_pack = primary_color_layers.view(
-                    primary_color_layers.size(0), 
-                    -1, 
-                    primary_color_layers.size(3), 
-                    primary_color_layers.size(4)
-                )
-                primary_color_pack = cut_edge(primary_color_pack, resize_scale_factor)
-                primary_color_layers = primary_color_pack.view(
-                    primary_color_pack.size(0),
-                    -1, 
-                    3, 
-                    primary_color_pack.size(2), 
-                    primary_color_pack.size(3)
-                )
-                
-                # Предсказание альфа слоев
-                pred_alpha_layers_pack = mask_generator(target_img, primary_color_pack)
-                pred_alpha_layers = pred_alpha_layers_pack.view(
-                    target_img.size(0), 
-                    -1, 
-                    1, 
-                    target_img.size(2), 
-                    target_img.size(3)
-                )
-                
-                # Обработка альфа слоев
-                processed_alpha_layers = alpha_normalize(pred_alpha_layers)
-                
-                # Можно добавить дополнительные обработки здесь:
-                # processed_alpha_layers = proc_guidedfilter(processed_alpha_layers, target_img) # Option
-                processed_alpha_layers = alpha_normalize(processed_alpha_layers)  # Двойная нормализация
-                
-                # Создание монохромных слоев RGBA
-                mono_color_layers = torch.cat((primary_color_layers, processed_alpha_layers), 2)
-                mono_color_layers_pack = mono_color_layers.view(
-                    target_img.size(0), 
-                    -1, 
-                    target_img.size(2), 
-                    target_img.size(3)
-                )
-                
-                # Предсказание остатков
-                residue_pack = residue_predictor(target_img, mono_color_layers_pack)
-                residue = residue_pack.view(
-                    target_img.size(0), 
-                    -1, 
-                    3, 
-                    target_img.size(2), 
-                    target_img.size(3)
-                )
-                
-                # Получение окончательных RGB слоев
-                pred_unmixed_rgb_layers = torch.clamp((primary_color_layers + residue), min=0., max=1.0)
-                
-                # Создание окончательных RGBA слоев
-                RGBA_layers = torch.cat((pred_unmixed_rgb_layers, processed_alpha_layers), dim=2)
-                
-                # Преобразование в PIL изображения
-                RGBA_layers = RGBA_layers[0]  # ln, 4, h, w
-                
-                for i in range(len(RGBA_layers)):
-                    im = RGBA_layers[i, :, :, :].cpu().numpy()
-                    im = im.transpose((1, 2, 0))
-                    im = normalize_to_0_255(im)
-                    layersRGBA.append(Image.fromarray(im))
-                
-                break
-        
-        return layersRGBA
+        # Конвертируем в список кортежей
+        return [tuple(map(int, color)) for color in sorted_colors]
     
     except Exception as e:
-        st.error(f"Ошибка при выполнении метода Fast Soft Color Segmentation: {str(e)}")
-        import traceback
-        st.code(traceback.format_exc())
-        return []
+        st.error(f"Ошибка при получении доминирующих цветов: {e}")
+        # Возвращаем стандартную палитру в случае ошибки
+        return [(255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 0), (255, 0, 255)][:num_colors]
 
-def decompose_layers_to_cv_format(decompose_layers, bg_color):
-    """
-    Преобразует слои RGBA из метода decompose в формат BGR с прозрачностью,
-    учитывая заданный цвет фона.
-    """
-    cv_layers = []
-    color_info_list = []
+def create_color_palette_preview(colors, size=(200, 50)):
+    """Создает визуальное представление палитры цветов"""
+    if not colors:
+        return None
     
-    for i, pil_layer in enumerate(decompose_layers):
-        # Конвертируем PIL Image в numpy array
-        rgba_array = np.array(pil_layer)
-        
-        # Если слой RGBA, разделяем на RGB и альфа
-        if rgba_array.shape[2] == 4:
-            rgb_array = rgba_array[:, :, :3]
-            alpha_array = rgba_array[:, :, 3] / 255.0
-            
-            # Создаем слой с прозрачностью на белом фоне
-            layer_with_bg = np.zeros_like(rgb_array, dtype=np.uint8)
-            
-            # Применяем альфа-канал
-            for c in range(3):
-                layer_with_bg[:, :, c] = rgb_array[:, :, c] * alpha_array + bg_color[c] * (1 - alpha_array)
-            
-            # Конвертируем RGB в BGR для OpenCV
-            bgr_layer = cv2.cvtColor(layer_with_bg, cv2.COLOR_RGB2BGR)
-            
-            # Вычисляем доминирующий цвет слоя
-            # Используем медиану цветов, где альфа > 0.1
-            mask = alpha_array > 0.1
-            if np.any(mask):
-                # Получаем цвета пикселей с высокой прозрачностью
-                masked_colors = rgb_array[mask]
-                # Вычисляем медианный цвет
-                if len(masked_colors) > 0:
-                    median_color = np.median(masked_colors, axis=0).astype(int)
-                    # Конвертируем RGB в BGR для консистентности
-                    median_color_bgr = (median_color[2], median_color[1], median_color[0])
-                else:
-                    median_color_bgr = bg_color
-            else:
-                # Если нет достаточно непрозрачных пикселей, используем средний цвет
-                median_color_bgr = bg_color
-            
-            # Вычисляем процент покрытия
-            coverage_percentage = (np.sum(mask) / mask.size) * 100
-            
-            cv_layers.append(bgr_layer)
-            color_info_list.append({
-                'color': median_color_bgr,
-                'percentage': coverage_percentage
-            })
-        else:
-            # Если слой RGB (без альфа), просто конвертируем
-            bgr_layer = cv2.cvtColor(rgba_array, cv2.COLOR_RGB2BGR)
-            
-            # Вычисляем доминирующий цвет
-            if rgba_array.size > 0:
-                unique_colors, counts = np.unique(rgba_array.reshape(-1, 3), axis=0, return_counts=True)
-                if len(unique_colors) > 0:
-                    dominant_color_idx = np.argmax(counts)
-                    dominant_color_rgb = unique_colors[dominant_color_idx]
-                    dominant_color_bgr = (dominant_color_rgb[2], dominant_color_rgb[1], dominant_color_rgb[0])
-                else:
-                    dominant_color_bgr = bg_color
-            else:
-                dominant_color_bgr = bg_color
-            
-            # Процент покрытия (все пиксели, кроме фона)
-            non_bg_mask = np.any(bgr_layer != bg_color, axis=2)
-            coverage_percentage = (np.sum(non_bg_mask) / non_bg_mask.size) * 100
-            
-            cv_layers.append(bgr_layer)
-            color_info_list.append({
-                'color': dominant_color_bgr,
-                'percentage': coverage_percentage
-            })
+    palette_height = 50
+    palette_width = len(colors) * 50
     
-    return cv_layers, color_info_list
+    # Создаем изображение палитры
+    palette_img = np.zeros((palette_height, palette_width, 3), dtype=np.uint8)
+    
+    for i, color in enumerate(colors):
+        start_x = i * 50
+        end_x = (i + 1) * 50
+        palette_img[:, start_x:end_x] = color[::-1]  # RGB to BGR for OpenCV
+    
+    return palette_img
 
-# ==================== ФУНКЦИИ ДЛЯ МЕТОДА K-MEANS ====================
-
-def kmeans_color_separation(img, n_colors=5, bg_color=(255, 255, 255), **kwargs):
+def smart_color_separation_kmeans(img_cv, n_colors=5, bg_color=(255, 255, 255)):
     """
-    Разделение цветов с использованием алгоритма K-means
-    Поддерживает от 2 до 8 цветов
+    Умное разделение цветов с использованием K-means с улучшенной обработкой
     """
-    if n_colors < 2 or n_colors > 8:
-        st.error(f"Количество цветов должно быть от 2 до 8. Получено: {n_colors}")
-        return [], []
-    
     try:
-        # Преобразуем изображение в формат для K-means
-        pixels = img.reshape(-1, 3)
+        # Конвертируем BGR в RGB для K-means
+        img_rgb = cv2.cvtColor(img_cv, cv2.COLOR_BGR2RGB)
         
-        # Удаляем пиксели фона
-        if bg_color:
-            bg_mask = np.all(pixels == bg_color, axis=1)
+        # Преобразуем изображение в формат для K-means
+        pixels = img_rgb.reshape(-1, 3)
+        
+        # Удаляем пиксели фона если нужно
+        if bg_color is not None:
+            bg_rgb = bg_color[::-1]  # BGR to RGB
+            bg_mask = np.all(pixels == bg_rgb, axis=1)
             if np.any(bg_mask):
                 pixels = pixels[~bg_mask]
         
-        # Если после удаления фона не осталось пикселей
         if len(pixels) == 0:
             st.warning("Изображение состоит только из фона")
             return [], []
         
-        # Применяем K-means
-        kmeans = KMeans(n_clusters=n_colors, random_state=42, n_init=10)
-        labels = kmeans.fit_predict(pixels)
+        # Применяем K-means с улучшенными параметрами
+        kmeans = KMeans(
+            n_clusters=n_colors, 
+            random_state=42, 
+            n_init=10,
+            max_iter=500,
+            tol=1e-4
+        )
         
-        # Восстанавливаем маску для всего изображения
-        full_labels = np.zeros(img.shape[0] * img.shape[1], dtype=int) - 1
-        if bg_color:
-            bg_mask_full = np.all(img.reshape(-1, 3) == bg_color, axis=1)
-            non_bg_indices = np.where(~bg_mask_full)[0]
-            if len(non_bg_indices) >= len(labels):
-                full_labels[non_bg_indices[:len(labels)]] = labels
+        labels = kmeans.fit_predict(pixels)
+        centers = kmeans.cluster_centers_.astype(int)
+        
+        # Сортируем цвета по площади покрытия
+        unique_labels, counts = np.unique(labels, return_counts=True)
+        sorted_indices = np.argsort(counts)[::-1]
         
         # Создаем слои
         color_layers = []
         color_info = []
         
-        for i in range(n_colors):
-            # Создаем маску для текущего кластера
-            mask = (full_labels == i).reshape(img.shape[0], img.shape[1])
+        # Создаем базовый фон
+        base_background = np.full_like(img_cv, bg_color)
+        
+        # Для каждого кластера создаем слой
+        for idx in sorted_indices:
+            # Получаем цвет кластера
+            cluster_color = centers[idx]
             
-            # Создаем слой с фоном
-            layer = np.full_like(img, bg_color)
+            # Создаем маску для этого кластера
+            # Восстанавливаем полную маску
+            full_mask = np.zeros(img_rgb.shape[:2], dtype=bool)
             
-            # Заполняем цветом кластера
-            cluster_color = kmeans.cluster_centers_[i].astype(int)
-            layer[mask] = cluster_color
+            # Заполняем маску только для не-фоновых пикселей
+            if bg_color is not None:
+                # Получаем маску всех не-фоновых пикселей
+                non_bg_mask = ~np.all(img_rgb == bg_rgb, axis=2)
+                
+                # Получаем пиксели, принадлежащие этому кластеру
+                cluster_pixels = labels == idx
+                
+                # Восстанавливаем индексы
+                pixel_indices = np.arange(len(pixels))[cluster_pixels]
+                
+                # Преобразуем в координаты изображения
+                h, w = img_rgb.shape[:2]
+                y_coords = pixel_indices // w
+                x_coords = pixel_indices % w
+                
+                # Создаем маску
+                full_mask[y_coords, x_coords] = True
+            else:
+                # Если фон не задан, используем все пиксели
+                h, w = img_rgb.shape[:2]
+                pixel_indices = np.arange(len(pixels))
+                y_coords = pixel_indices // w
+                x_coords = pixel_indices % w
+                cluster_pixels = labels == idx
+                
+                mask_indices = pixel_indices[cluster_pixels]
+                y_mask = mask_indices // w
+                x_mask = mask_indices % w
+                full_mask[y_mask, x_mask] = True
+            
+            # Создаем слой
+            layer = base_background.copy()
+            
+            # Заполняем область кластера
+            for c in range(3):
+                layer[:, :, c][full_mask] = cluster_color[c]
             
             color_layers.append(layer)
+            
+            # Информация о цвете
+            color_bgr = (int(cluster_color[2]), int(cluster_color[1]), int(cluster_color[0]))
+            coverage = (np.sum(full_mask) / full_mask.size) * 100
+            
             color_info.append({
-                'color': (int(cluster_color[0]), 
-                         int(cluster_color[1]), 
-                         int(cluster_color[2])),
-                'percentage': (np.sum(mask) / mask.size) * 100
+                'color': color_bgr,
+                'percentage': coverage,
+                'rgb_color': tuple(cluster_color)
             })
         
         return color_layers, color_info
@@ -740,13 +471,146 @@ def kmeans_color_separation(img, n_colors=5, bg_color=(255, 255, 255), **kwargs)
         st.error(f"Ошибка в методе K-means: {str(e)}")
         return [], []
 
-# ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
+def decompose_fast_soft_color_simple(
+    input_image: Image.Image,
+    num_colors: int = 5,
+    palette: list[tuple] = None,
+    device: str = "cpu"
+) -> list[Image.Image]:
+    """
+    Упрощенная версия Fast Soft Color Segmentation с исправленными цветами
+    """
+    try:
+        if not model_available:
+            st.error("Модель не найдена.")
+            return []
+        
+        # Конвертируем PIL в numpy
+        img_np = np.array(input_image.convert("RGB"))
+        
+        # Получаем доминирующие цвета ИЗ САМОГО ИЗОБРАЖЕНИЯ
+        if palette is None:
+            palette = get_dominant_colors(input_image, num_colors)
+        
+        # Отображаем полученную палитру
+        with st.expander("🎨 Полученная палитра цветов", expanded=False):
+            st.write(f"Количество цветов: {len(palette)}")
+            for i, color in enumerate(palette):
+                hex_color = "#{:02x}{:02x}{:02x}".format(color[0], color[1], color[2])
+                st.markdown(f"""
+                <div style='display: flex; align-items: center; margin: 5px 0; padding: 10px; background: #f8f9fa; border-radius: 5px;'>
+                    <div style='width: 30px; height: 30px; background-color: {hex_color}; border: 1px solid #000; border-radius: 4px; margin-right: 10px;'></div>
+                    <div>
+                        <strong>Цвет {i+1}:</strong> RGB{color} | {hex_color}
+                    </div>
+                </div>
+                """, unsafe_allow_html=True)
+        
+        # Создаем простую сегментацию на основе цветов
+        img_cv = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
+        
+        # Создаем слои для каждого цвета палитры
+        color_layers = []
+        
+        for color_idx, target_color in enumerate(palette):
+            # Конвертируем цвет в BGR
+            target_color_bgr = (target_color[2], target_color[1], target_color[0])
+            
+            # Вычисляем расстояние до целевого цвета
+            img_float = img_cv.astype(np.float32)
+            target_float = np.array(target_color_bgr, dtype=np.float32).reshape(1, 1, 3)
+            
+            # Вычисляем цветовое расстояние
+            color_diff = np.sqrt(np.sum((img_float - target_float) ** 2, axis=2))
+            
+            # Нормализуем и создаем альфа-канал
+            max_diff = np.max(color_diff)
+            if max_diff > 0:
+                alpha = 1.0 - (color_diff / max_diff)
+            else:
+                alpha = np.ones_like(color_diff)
+            
+            # Повышаем контраст альфа-канала
+            alpha = alpha ** 0.5  # Делаем более четкие границы
+            
+            # Создаем слой с прозрачностью
+            layer = np.zeros_like(img_cv, dtype=np.uint8)
+            
+            for c in range(3):
+                layer[:, :, c] = (img_cv[:, :, c] * alpha + 
+                                 target_color_bgr[c] * (1 - alpha)).astype(np.uint8)
+            
+            color_layers.append(layer)
+        
+        # Конвертируем слои в PIL изображения
+        pil_layers = []
+        for layer in color_layers:
+            rgb_layer = cv2.cvtColor(layer, cv2.COLOR_BGR2RGB)
+            pil_layers.append(Image.fromarray(rgb_layer))
+        
+        return pil_layers
+    
+    except Exception as e:
+        st.error(f"Ошибка в упрощенном методе: {str(e)}")
+        return []
+
+def decompose_layers_to_cv_format(decompose_layers, bg_color):
+    """
+    Преобразует слои в формат OpenCV с правильными цветами
+    """
+    cv_layers = []
+    color_info_list = []
+    
+    for i, pil_layer in enumerate(decompose_layers):
+        # Конвертируем PIL Image в numpy array
+        rgb_array = np.array(pil_layer)
+        
+        # Если изображение RGBA, конвертируем в RGB
+        if rgb_array.shape[2] == 4:
+            rgb_array = rgb_array[:, :, :3]
+        
+        # Конвертируем RGB в BGR для OpenCV
+        bgr_layer = cv2.cvtColor(rgb_array, cv2.COLOR_RGB2BGR)
+        
+        # Вычисляем доминирующий цвет (игнорируем фон)
+        if bg_color is not None:
+            # Создаем маску не-фоновых пикселей
+            non_bg_mask = ~np.all(bgr_layer == bg_color, axis=2)
+            
+            if np.any(non_bg_mask):
+                # Получаем цвета не-фоновых пикселей
+                non_bg_colors = bgr_layer[non_bg_mask]
+                
+                # Используем медиану для устранения шума
+                if len(non_bg_colors) > 0:
+                    median_color = np.median(non_bg_colors, axis=0).astype(int)
+                    dominant_color = tuple(median_color)
+                else:
+                    dominant_color = bg_color
+            else:
+                dominant_color = bg_color
+            
+            # Процент покрытия
+            coverage_percentage = (np.sum(non_bg_mask) / non_bg_mask.size) * 100
+        else:
+            # Если фон не задан, используем средний цвет всего слоя
+            dominant_color = tuple(np.median(bgr_layer.reshape(-1, 3), axis=0).astype(int))
+            coverage_percentage = 100
+        
+        cv_layers.append(bgr_layer)
+        color_info_list.append({
+            'color': dominant_color,
+            'percentage': coverage_percentage,
+            'rgb_color': tuple(dominant_color[::-1])  # BGR to RGB
+        })
+    
+    return cv_layers, color_info_list
 
 def convert_to_png(image_array, filename):
     """Конвертирует массив изображения в формат PNG"""
     try:
         fig, ax = plt.subplots(figsize=(10, 10))
-        ax.imshow(image_array)
+        ax.imshow(cv2.cvtColor(image_array, cv2.COLOR_BGR2RGB))
         ax.axis('off')
         fig.tight_layout(pad=0)
         
@@ -766,12 +630,23 @@ def create_bw_mask(layer, bg_color):
     Создает черно-белую маску из цветного слоя.
     Белый = область цвета, Черный = фон.
     """
+    if bg_color is None:
+        # Если фон не задан, считаем темные пиксели фоном
+        gray = cv2.cvtColor(layer, cv2.COLOR_BGR2GRAY)
+        _, mask = cv2.threshold(gray, 10, 255, cv2.THRESH_BINARY)
+        return mask
+    
     # Создаем маску для определения фона
     is_background = np.all(layer == bg_color, axis=2)
     
     # Создаем маску (255 для цвета, 0 для фона)
     mask = np.zeros((layer.shape[0], layer.shape[1]), dtype=np.uint8)
     mask[~is_background] = 255
+    
+    # Применяем морфологические операции для очистки маски
+    kernel = np.ones((3, 3), np.uint8)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
     
     return mask
 
@@ -802,6 +677,35 @@ def resize_layer_to_match(layer, target_shape):
     
     return cv2.resize(layer, (target_shape[1], target_shape[0]), interpolation=cv2.INTER_LINEAR)
 
+def create_combined_preview(color_layers, bg_color_rgb, layer_order, layer_visibility):
+    """Создает комбинированный предпросмотр из видимых слоев"""
+    if not color_layers:
+        return None
+    
+    # Создаем базовое изображение
+    first_layer = color_layers[0]
+    combined = np.full_like(first_layer, bg_color_rgb)
+    
+    # Сортируем индексы по порядку (от нижнего к верхнему)
+    sorted_indices = sorted(range(len(layer_order)), key=lambda x: layer_order[x])
+    
+    # Применяем слои в правильном порядке
+    for idx in sorted_indices:
+        if layer_visibility[idx]:
+            layer = color_layers[idx]
+            
+            # Проверяем размеры и изменяем при необходимости
+            if layer.shape != combined.shape:
+                layer = resize_layer_to_match(layer, combined.shape)
+            
+            # Создаем маску (где есть цвет, отличный от фона)
+            mask = np.any(layer != bg_color_rgb, axis=2)
+            
+            # Применяем слой только там, где есть маска
+            combined[mask] = layer[mask]
+    
+    return combined
+
 # ==================== БОКОВАЯ ПАНЕЛЬ ====================
 
 with st.sidebar:
@@ -810,7 +714,8 @@ with st.sidebar:
     # Загрузка изображения
     st.markdown("<h4>📤 Загрузите изображение</h4>", unsafe_allow_html=True)
     uploaded_file = st.file_uploader("Выберите файл", type=["jpg", "jpeg", "png", "bmp", "tiff"], 
-                                    label_visibility="collapsed")
+                                    label_visibility="collapsed",
+                                    key="file_uploader")
     
     if uploaded_file is not None:
         # Сохраняем в session state
@@ -818,66 +723,50 @@ with st.sidebar:
         
         # Выбор метода
         st.markdown("<h4>🎯 Выберите метод</h4>", unsafe_allow_html=True)
-        methods = ["K-средних кластеризация"]
+        methods = ["K-средних кластеризация (рекомендуется)"]
         if model_available:
-            methods.append("Fast Soft Color Segmentation (полная реализация)")
+            methods.append("Упрощенный нейронный метод")
         
         selected_method = st.selectbox("Метод разделения", methods, 
-                                      label_visibility="collapsed")
+                                      label_visibility="collapsed",
+                                      key="method_selector")
         st.session_state.selected_method = selected_method
         
         # Количество цветов
         st.markdown("<h4>🌈 Количество цветов</h4>", unsafe_allow_html=True)
-        num_colors = st.slider("От 2 до 8 цветов", 2, 8, 5, 
+        num_colors = st.slider("От 2 до 10 цветов", 2, 10, 5, 
                               help="Выберите количество цветов для извлечения из изображения",
-                              label_visibility="collapsed")
+                              label_visibility="collapsed",
+                              key="num_colors_slider")
         
         # Цвет фона
         st.markdown("<h4>🎨 Цвет фона</h4>", unsafe_allow_html=True)
         bg_color = st.color_picker("Цвет фона для слоев", "#FFFFFF", 
-                                  label_visibility="collapsed")
+                                  label_visibility="collapsed",
+                                  key="bg_color_picker")
         bg_color_rgb = tuple(int(bg_color.lstrip('#')[i:i+2], 16) for i in (0, 2, 4))
         
-        # Дополнительные настройки для нейронной сети
-        if selected_method == "Fast Soft Color Segmentation (полная реализация)" and model_available:
-            st.markdown("<h4>⚡ Настройки нейронной сети</h4>", unsafe_allow_html=True)
-            resize_factor = st.slider("Масштаб", 0.5, 2.0, 1.0, 0.1,
-                                     help="Коэффициент изменения размера для обработки",
-                                     label_visibility="collapsed")
-            
-            # Выбор устройства
-            device_option = st.selectbox(
-                "Устройство для обработки",
-                ["cpu", "cuda"],
-                index=0,
-                help="Выберите устройство для обработки (cuda для GPU)"
-            )
+        # Дополнительные опции для K-means
+        if selected_method == "K-средних кластеризация (рекомендуется)":
+            with st.expander("⚙️ Дополнительные настройки K-means", expanded=False):
+                use_smart_bg_removal = st.checkbox("Удалить фон при анализе", True,
+                                                  help="Игнорировать цвет фона при определении доминирующих цветов")
+                
+                enhance_edges = st.checkbox("Улучшить границы", True,
+                                          help="Сделать границы между цветами более четкими")
         
         # Дополнительные опции
-        with st.expander("🛠️ Дополнительные настройки", expanded=False):
-            st.markdown("<p style='color: #666; font-size: 0.9em;'>Эти настройки отключены по умолчанию для лучшей производительности</p>", 
-                       unsafe_allow_html=True)
-            
+        with st.expander("🛠️ Общие настройки", expanded=False):
             col1, col2 = st.columns(2)
             with col1:
-                apply_smoothing = st.checkbox("Сглаживание", False, 
-                                             help="Применить сглаживание к маскам")
-                if apply_smoothing:
-                    smoothing_amount = st.slider("Степень сглаживания", 1, 10, 3, 
-                                                label_visibility="collapsed")
+                export_quality = st.selectbox("Качество экспорта", 
+                                            ["Высокое (300 DPI)", "Среднее (150 DPI)", "Низкое (72 DPI)"],
+                                            index=1)
             
             with col2:
-                apply_sharpening = st.checkbox("Резкость", False,
-                                              help="Увеличить резкость границ")
-                if apply_sharpening:
-                    sharpening_amount = st.slider("Степень резкости", 0.1, 3.0, 1.0, 0.1,
-                                                 label_visibility="collapsed")
-            
-            noise_reduction = st.checkbox("Уменьшение шума", False,
-                                         help="Уменьшить шум в масках")
-            if noise_reduction:
-                noise_amount = st.slider("Степень уменьшения", 1, 10, 3,
-                                        label_visibility="collapsed")
+                preview_size = st.selectbox("Размер предпросмотра",
+                                          ["Большой", "Средний", "Малый"],
+                                          index=1)
 
 # ==================== ОСНОВНОЕ СОДЕРЖИМОЕ ====================
 
@@ -896,10 +785,17 @@ if st.session_state.uploaded_file is not None:
     selected_method = st.session_state.selected_method
     
     # Показываем информацию о выбранном методе
+    method_descriptions = {
+        "K-средних кластеризация (рекомендуется)": "Классический алгоритм для группировки похожих цветов",
+        "Упрощенный нейронный метод": "Упрощенная нейронная сеть для цветовой сегментации"
+    }
+    
     st.markdown(f"""
     <div class="method-card">
         <h4>🎯 Выбранный метод: <strong>{selected_method}</strong></h4>
-        <p>📊 Количество цветов: <strong>{num_colors}</strong> | 🎨 Цвет фона: <span style='color: {bg_color}; font-weight: bold;'>{bg_color}</span></p>
+        <p>{method_descriptions.get(selected_method, '')}</p>
+        <p>📊 Количество цветов: <strong>{num_colors}</strong> | 🎨 Цвет фона: 
+        <span style='color: {bg_color}; font-weight: bold; background-color: #f0f0f0; padding: 2px 8px; border-radius: 3px;'>{bg_color}</span></p>
     </div>
     """, unsafe_allow_html=True)
     
@@ -918,77 +814,142 @@ if st.session_state.uploaded_file is not None:
         st.image(image, use_column_width=True)
         
         # Информация об изображении
-        with st.expander("📊 Информация об изображении"):
+        with st.expander("📊 Информация об изображении", expanded=False):
             st.write(f"**Размер:** {image.width} × {image.height} пикселей")
             st.write(f"**Формат:** {image.format}")
             st.write(f"**Режим:** {image.mode}")
             st.write(f"**Размер файла:** {len(image_bytes) / 1024:.1f} KB")
+            
+            # Показываем основные цвета изображения
+            st.write("**Основные цвета изображения:**")
+            try:
+                from collections import Counter
+                img_array = np.array(image.convert("RGB"))
+                pixels = img_array.reshape(-1, 3)
+                
+                # Берем случайную выборку для скорости
+                if len(pixels) > 10000:
+                    np.random.seed(42)
+                    indices = np.random.choice(len(pixels), 10000, replace=False)
+                    sample_pixels = pixels[indices]
+                else:
+                    sample_pixels = pixels
+                
+                # Группируем похожие цвета
+                from sklearn.cluster import MiniBatchKMeans
+                kmeans = MiniBatchKMeans(n_clusters=5, random_state=42)
+                labels = kmeans.fit_predict(sample_pixels)
+                centers = kmeans.cluster_centers_.astype(int)
+                
+                # Отображаем цвета
+                colors_html = ""
+                for color in centers:
+                    hex_color = "#{:02x}{:02x}{:02x}".format(color[0], color[1], color[2])
+                    colors_html += f'<div style="display: inline-block; width: 20px; height: 20px; background-color: {hex_color}; margin: 2px; border: 1px solid #ccc; border-radius: 3px;" title="RGB{tuple(color)}"></div>'
+                
+                st.markdown(f'<div style="margin-top: 10px;">{colors_html}</div>', unsafe_allow_html=True)
+            except:
+                pass
     
     with col2:
         st.markdown("<h3 class='sub-header'>🎨 Разделенные цветовые слои</h3>", unsafe_allow_html=True)
         
         # Кнопка для запуска обработки
-        if st.button("🚀 Начать разделение цветов", type="primary", use_container_width=True):
+        process_button = st.button("🚀 Начать разделение цветов", 
+                                 type="primary", 
+                                 use_container_width=True,
+                                 key="process_button")
+        
+        if process_button:
             with st.spinner("🔄 Обработка изображения... Пожалуйста, подождите."):
+                progress_bar = st.progress(0)
+                
                 try:
-                    if selected_method == "K-средних кластеризация":
-                        # Используем K-means
-                        color_layers, color_info = kmeans_color_separation(
+                    # Шаг 1: Подготовка
+                    progress_bar.progress(10)
+                    
+                    if selected_method == "K-средних кластеризация (рекомендуется)":
+                        # Используем K-means с улучшенными параметрами
+                        progress_bar.progress(30)
+                        
+                        color_layers, color_info = smart_color_separation_kmeans(
                             img_cv, 
                             n_colors=num_colors,
                             bg_color=bg_color_rgb
                         )
+                        
+                        progress_bar.progress(70)
                     
-                    elif selected_method == "Fast Soft Color Segmentation (полная реализация)":
-                        # Используем полную реализацию нейронной сети
-                        if not model_available:
-                            st.error("Модели не найдены. Используйте метод K-means или загрузите модели.")
-                            color_layers, color_info = [], []
-                        else:
-                            # Получаем доминирующие цвета для палитры
-                            palette_colors = get_dominant_colors(image, num_colors)
-                            
-                            # Определяем устройство
-                            device = "cuda" if torch.cuda.is_available() and 'device_option' in locals() and device_option == "cuda" else "cpu"
-                            
-                            # Вызываем полную функцию decompose
-                            decompose_layers = decompose_fast_soft_color_full(
-                                image,
-                                num_colors=num_colors,
-                                palette=palette_colors,
-                                resize_scale_factor=resize_factor if 'resize_factor' in locals() else 1.0,
-                                device=device
+                    elif selected_method == "Упрощенный нейронный метод":
+                        # Используем упрощенный нейронный метод
+                        progress_bar.progress(30)
+                        
+                        # Получаем доминирующие цвета
+                        palette_colors = get_dominant_colors(image, num_colors)
+                        st.session_state.palette_colors = palette_colors
+                        
+                        # Вызываем упрощенную функцию
+                        decompose_layers = decompose_fast_soft_color_simple(
+                            image,
+                            num_colors=num_colors,
+                            palette=palette_colors,
+                            device="cpu"
+                        )
+                        
+                        progress_bar.progress(50)
+                        
+                        if decompose_layers:
+                            # Преобразуем слои в формат для отображения
+                            color_layers, color_info = decompose_layers_to_cv_format(
+                                decompose_layers, 
+                                bg_color_rgb
                             )
-                            
-                            if decompose_layers:
-                                # Преобразуем слои decompose в формат для отображения
-                                color_layers, color_info = decompose_layers_to_cv_format(
-                                    decompose_layers, 
-                                    bg_color_rgb
-                                )
-                            else:
-                                st.error("Не удалось выполнить разделение с помощью нейронной сети.")
-                                color_layers, color_info = [], []
+                        else:
+                            st.error("Не удалось выполнить разделение с помощью нейронной сети.")
+                            color_layers, color_info = [], []
+                        
+                        progress_bar.progress(70)
+                    
+                    # Шаг 2: Обработка результатов
+                    progress_bar.progress(80)
                     
                     # Сохраняем результаты в session state
                     st.session_state.color_layers = color_layers
                     st.session_state.color_info = color_info
+                    st.session_state.processing_done = True
+                    
+                    # Шаг 3: Завершение
+                    progress_bar.progress(100)
                     
                     if color_layers and color_info:
                         st.success(f"✅ Успешно создано {len(color_layers)} цветовых слоев!")
+                        
+                        # Показываем информацию о полученных цветах
+                        with st.expander("📊 Статистика по слоям", expanded=False):
+                            total_coverage = sum(info['percentage'] for info in color_info)
+                            st.write(f"**Общее покрытие:** {total_coverage:.1f}%")
+                            
+                            for i, info in enumerate(color_info):
+                                hex_color = "#{:02x}{:02x}{:02x}".format(
+                                    info['color'][2], info['color'][1], info['color'][0]
+                                )
+                                st.write(f"**Слой {i+1}:** {hex_color} - {info['percentage']:.1f}%")
                     else:
                         st.warning("⚠️ Не удалось создать цветовые слои. Попробуйте изменить параметры.")
                         
                 except Exception as e:
                     st.error(f"❌ Ошибка при обработке изображения: {str(e)}")
+                    import traceback
+                    st.code(traceback.format_exc())
         
         # Показываем результаты если они есть
         color_layers = st.session_state.color_layers
         color_info = st.session_state.color_info
         
-        if color_layers and color_info:
+        if color_layers and color_info and st.session_state.processing_done:
             # Создаем вкладки для каждого слоя
-            tabs = st.tabs([f"Слой {i+1}" for i in range(len(color_layers))])
+            tab_names = [f"Слой {i+1}" for i in range(len(color_layers))]
+            tabs = st.tabs(tab_names)
             
             for i, (layer, info) in enumerate(zip(color_layers, color_info)):
                 with tabs[i]:
@@ -997,7 +958,14 @@ if st.session_state.uploaded_file is not None:
                     with col_left:
                         # Конвертация слоя из BGR в RGB для отображения
                         layer_rgb = cv2.cvtColor(layer, cv2.COLOR_BGR2RGB)
-                        st.image(layer_rgb, use_column_width=True)
+                        
+                        # Настраиваем размер предпросмотра
+                        if preview_size == "Большой":
+                            st.image(layer_rgb, use_column_width=True)
+                        elif preview_size == "Средний":
+                            st.image(layer_rgb, use_column_width=True)
+                        else:
+                            st.image(layer_rgb, use_column_width=True)
                         
                         # Кнопки для скачивания
                         col_btn1, col_btn2 = st.columns(2)
@@ -1008,7 +976,7 @@ if st.session_state.uploaded_file is not None:
                             png_data = save_bw_mask_as_png(bw_mask, f"mask_{i+1}")
                             
                             if png_data:
-                                hex_color = "{:02x}{:02x}{:02x}".format(
+                                hex_color = "#{:02x}{:02x}{:02x}".format(
                                     info['color'][2], info['color'][1], info['color'][0]
                                 )
                                 
@@ -1017,14 +985,15 @@ if st.session_state.uploaded_file is not None:
                                     data=png_data,
                                     file_name=f"layer_{i+1}_mask.png",
                                     mime="image/png",
-                                    key=f"download_mask_{i}"
+                                    key=f"download_mask_{i}",
+                                    use_container_width=True
                                 )
                         
                         with col_btn2:
                             # Цветной слой
-                            color_png_data = convert_to_png(layer_rgb, f"layer_{i+1}")
+                            color_png_data = convert_to_png(layer, f"layer_{i+1}")
                             if color_png_data:
-                                hex_color = "{:02x}{:02x}{:02x}".format(
+                                hex_color = "#{:02x}{:02x}{:02x}".format(
                                     info['color'][2], info['color'][1], info['color'][0]
                                 )
                                 
@@ -1033,7 +1002,8 @@ if st.session_state.uploaded_file is not None:
                                     data=color_png_data,
                                     file_name=f"layer_{i+1}_color.png",
                                     mime="image/png",
-                                    key=f"download_color_{i}"
+                                    key=f"download_color_{i}",
+                                    use_container_width=True
                                 )
                     
                     with col_right:
@@ -1041,21 +1011,23 @@ if st.session_state.uploaded_file is not None:
                         hex_color = "#{:02x}{:02x}{:02x}".format(
                             info['color'][2], info['color'][1], info['color'][0]
                         )
+                        rgb_color = info.get('rgb_color', info['color'][::-1])
                         
                         st.markdown(f"""
-                        <div style='padding: 15px; background-color: #f8f9fa; border-radius: 10px;'>
+                        <div style='padding: 15px; background-color: #f8f9fa; border-radius: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.05);'>
                             <div style='display: flex; align-items: center; margin-bottom: 15px;'>
-                                <div class='color-chip' style='background-color: {hex_color};'></div>
+                                <div class='color-chip' style='background-color: {hex_color}; box-shadow: 0 2px 4px rgba(0,0,0,0.2);'></div>
                                 <div>
                                     <strong style='font-size: 1.2em;'>{hex_color}</strong><br>
                                     <span style='color: #666; font-size: 0.9em;'>Цвет слоя</span>
                                 </div>
                             </div>
-                            <div style='margin-bottom: 10px;'>
-                                <strong>RGB:</strong> {info['color'][::-1]}<br>
-                                <strong>Покрытие:</strong> {info['percentage']:.1f}%<br>
-                                <strong>Пикселей:</strong> {layer.shape[1]} × {layer.shape[0]}
+                            <div style='margin-bottom: 10px; padding: 10px; background-color: white; border-radius: 5px;'>
+                                <strong style='color: #333;'>RGB:</strong> {rgb_color}<br>
+                                <strong style='color: #333;'>Покрытие:</strong> {info['percentage']:.1f}%<br>
+                                <strong style='color: #333;'>Размер:</strong> {layer.shape[1]} × {layer.shape[0]}px
                             </div>
+                            <div class='progress-bar' style='width: {min(info['percentage'], 100)}%;'></div>
                         </div>
                         """, unsafe_allow_html=True)
             
@@ -1065,7 +1037,7 @@ if st.session_state.uploaded_file is not None:
             st.markdown("<h3 class='sub-header'>👁️ Комбинированный предпросмотр</h3>", unsafe_allow_html=True)
             
             # Настройки порядка слоев
-            with st.expander("⚙️ Управление порядком слоев", expanded=True):
+            with st.expander("⚙️ Управление порядком и видимостью слоев", expanded=True):
                 # Инициализация состояния сессии для порядка и видимости
                 if 'layer_order' not in st.session_state or len(st.session_state.layer_order) != len(color_layers):
                     st.session_state.layer_order = list(range(len(color_layers)))
@@ -1073,18 +1045,21 @@ if st.session_state.uploaded_file is not None:
                     st.session_state.layer_visibility = [True] * len(color_layers)
                 
                 # Настройки для каждого слоя
+                st.write("**Настройте порядок и видимость слоев:**")
+                
                 for i in range(len(color_layers)):
-                    col1, col2, col3 = st.columns([2, 1, 3])
+                    col1, col2, col3, col4 = st.columns([1, 1, 3, 1])
                     
                     with col1:
                         # Порядок слоя
                         order_value = st.number_input(
-                            f"Позиция слоя {i+1}",
+                            "Позиция",
                             min_value=1,
                             max_value=len(color_layers),
                             value=st.session_state.layer_order[i] + 1,
                             key=f"order_{i}",
-                            help="1 = нижний слой (фон), больше = выше"
+                            help="1 = нижний слой (фон), больше = выше",
+                            label_visibility="collapsed"
                         )
                         st.session_state.layer_order[i] = order_value - 1
                     
@@ -1093,7 +1068,8 @@ if st.session_state.uploaded_file is not None:
                         visibility = st.checkbox(
                             "Вкл",
                             value=st.session_state.layer_visibility[i],
-                            key=f"visibility_{i}"
+                            key=f"visibility_{i}",
+                            label_visibility="collapsed"
                         )
                         st.session_state.layer_visibility[i] = visibility
                     
@@ -1103,125 +1079,141 @@ if st.session_state.uploaded_file is not None:
                             color_info[i]['color'][2], color_info[i]['color'][1], color_info[i]['color'][0]
                         )
                         st.markdown(f"""
-                        <div style='display: flex; align-items: center; padding: 8px; background-color: {'#e8f5e9' if visibility else '#f5f5f5'}; border-radius: 5px;'>
-                            <div style='width: 25px; height: 25px; background-color: {hex_color}; border: 1px solid #000; border-radius: 4px; margin-right: 10px;'></div>
+                        <div style='display: flex; align-items: center; padding: 8px; background-color: {'#e8f5e9' if visibility else '#f5f5f5'}; border-radius: 5px; transition: all 0.3s ease;'>
+                            <div style='width: 25px; height: 25px; background-color: {hex_color}; border: 1px solid #000; border-radius: 4px; margin-right: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.1);'></div>
                             <div>
-                                <div><strong>Слой {i+1}</strong></div>
-                                <div style='font-size: 0.8em; color: #666;'>{hex_color} • {color_info[i]['percentage']:.1f}%</div>
+                                <div><strong>Слой {i+1}</strong> {'' if visibility else '(скрыт)'}</div>
+                                <div style='font-size: 0.8em; color: #666;'>{hex_color} • {color_info[i]['percentage']:.1f}% покрытия</div>
                             </div>
                         </div>
                         """, unsafe_allow_html=True)
+                    
+                    with col4:
+                        # Быстрое действие
+                        if st.button("👁️", key=f"quick_toggle_{i}", help="Быстро переключить видимость"):
+                            st.session_state.layer_visibility[i] = not st.session_state.layer_visibility[i]
+                            st.rerun()
             
             # Создание комбинированного изображения
-            combined = np.zeros_like(img_cv, dtype=np.uint8)
+            combined = create_combined_preview(
+                color_layers, 
+                bg_color_rgb, 
+                st.session_state.layer_order, 
+                st.session_state.layer_visibility
+            )
             
-            # Сортируем индексы по порядку (от нижнего к верхнему)
-            sorted_indices = sorted(range(len(st.session_state.layer_order)), 
-                                   key=lambda x: st.session_state.layer_order[x])
-            
-            # Применяем слои в правильном порядке
-            for idx in sorted_indices:
-                if st.session_state.layer_visibility[idx]:
-                    layer = color_layers[idx]
-                    
-                    # Проверяем размеры и изменяем при необходимости
-                    if layer.shape != combined.shape:
-                        layer = resize_layer_to_match(layer, combined.shape)
-                    
-                    # Создаем маску (где есть цвет, отличный от фона)
-                    mask = np.any(layer != bg_color_rgb, axis=2)
-                    
-                    # Применяем слой только там, где есть маска
-                    combined[mask] = layer[mask]
-            
-            # Сохраняем комбинированный превью в session state
-            st.session_state.combined_preview = combined
-            
-            # Отображаем комбинированное изображение
-            combined_rgb = cv2.cvtColor(combined, cv2.COLOR_BGR2RGB)
-            
-            visible_layers = sum(st.session_state.layer_visibility)
-            total_layers = len(color_layers)
-            
-            st.image(combined_rgb, 
-                    caption=f"Предпросмотр {visible_layers}/{total_layers} видимых слоев", 
-                    use_column_width=True)
-            
-            # Кнопки для скачивания комбинированного изображения
-            col_comb1, col_comb2 = st.columns(2)
-            
-            with col_comb1:
-                # Черно-белая маска комбинированного изображения
-                combined_bw_mask = np.zeros((combined.shape[0], combined.shape[1]), dtype=np.uint8)
+            if combined is not None:
+                # Сохраняем комбинированный превью в session state
+                st.session_state.combined_preview = combined
                 
-                for i, layer in enumerate(color_layers):
-                    if st.session_state.layer_visibility[i]:
-                        # Проверяем размеры
-                        if layer.shape[:2] != combined_bw_mask.shape:
-                            layer_resized = resize_layer_to_match(layer, combined_bw_mask.shape[:2] + (3,))
-                        else:
-                            layer_resized = layer
-                        
-                        layer_mask = create_bw_mask(layer_resized, bg_color_rgb)
-                        combined_bw_mask = cv2.bitwise_or(combined_bw_mask, layer_mask)
+                # Отображаем комбинированное изображение
+                combined_rgb = cv2.cvtColor(combined, cv2.COLOR_BGR2RGB)
                 
-                combined_png_data = save_bw_mask_as_png(combined_bw_mask, "combined_mask")
+                visible_layers = sum(st.session_state.layer_visibility)
+                total_layers = len(color_layers)
                 
-                if combined_png_data:
-                    st.download_button(
-                        label="⬇️ Скачать комбинированную ЧБ маску",
-                        data=combined_png_data,
-                        file_name="combined_mask.png",
-                        mime="image/png",
-                        key="download_combined_mask"
-                    )
-            
-            with col_comb2:
-                # Цветное комбинированное изображение
-                combined_color_png = convert_to_png(combined_rgb, "combined_preview")
-                if combined_color_png:
-                    st.download_button(
-                        label="⬇️ Скачать цветной предпросмотр",
-                        data=combined_color_png,
-                        file_name="combined_preview.png",
-                        mime="image/png",
-                        key="download_combined_color"
-                    )
+                st.image(combined_rgb, 
+                        caption=f"Предпросмотр {visible_layers}/{total_layers} видимых слоев", 
+                        use_column_width=True)
+                
+                # Кнопки для скачивания комбинированного изображения
+                col_comb1, col_comb2, col_comb3 = st.columns(3)
+                
+                with col_comb1:
+                    # Черно-белая маска комбинированного изображения
+                    combined_bw_mask = np.zeros((combined.shape[0], combined.shape[1]), dtype=np.uint8)
+                    
+                    for i, layer in enumerate(color_layers):
+                        if st.session_state.layer_visibility[i]:
+                            # Проверяем размеры
+                            if layer.shape[:2] != combined_bw_mask.shape:
+                                layer_resized = resize_layer_to_match(layer, combined_bw_mask.shape[:2] + (3,))
+                            else:
+                                layer_resized = layer
+                            
+                            layer_mask = create_bw_mask(layer_resized, bg_color_rgb)
+                            combined_bw_mask = cv2.bitwise_or(combined_bw_mask, layer_mask)
+                    
+                    combined_png_data = save_bw_mask_as_png(combined_bw_mask, "combined_mask")
+                    
+                    if combined_png_data:
+                        st.download_button(
+                            label="⬇️ ЧБ маска (все слои)",
+                            data=combined_png_data,
+                            file_name="combined_mask.png",
+                            mime="image/png",
+                            key="download_combined_mask",
+                            use_container_width=True
+                        )
+                
+                with col_comb2:
+                    # Цветное комбинированное изображение
+                    combined_color_png = convert_to_png(combined, "combined_preview")
+                    if combined_color_png:
+                        st.download_button(
+                            label="⬇️ Цветной предпросмотр",
+                            data=combined_color_png,
+                            file_name="combined_preview.png",
+                            mime="image/png",
+                            key="download_combined_color",
+                            use_container_width=True
+                        )
+                
+                with col_comb3:
+                    # Показать/скрыть все слои
+                    col_show, col_hide = st.columns(2)
+                    with col_show:
+                        if st.button("👁️ Показать все", use_container_width=True):
+                            st.session_state.layer_visibility = [True] * len(color_layers)
+                            st.rerun()
+                    with col_hide:
+                        if st.button("👁️ Скрыть все", use_container_width=True):
+                            st.session_state.layer_visibility = [False] * len(color_layers)
+                            st.rerun()
             
             # ==================== ПАКЕТНОЕ СКАЧИВАНИЕ ====================
             
             st.markdown("---")
             st.markdown("<h3 class='sub-header'>📦 Пакетное скачивание</h3>", unsafe_allow_html=True)
             
-            if st.button("📁 Создать ZIP-архив со всеми слоями", type="secondary", use_container_width=True):
-                with st.spinner("🔄 Создание архива..."):
+            if st.button("📁 Создать ZIP-архив со всеми слоями", 
+                        type="secondary", 
+                        use_container_width=True,
+                        key="create_zip_button"):
+                with st.spinner("🔄 Создание архива... Это может занять некоторое время."):
+                    progress_zip = st.progress(0)
+                    
                     with tempfile.TemporaryDirectory() as tmpdirname:
-                        # Сохраняем все слои
                         all_files = []
+                        total_files = len(color_layers) * 2 + 3  # Маски + цветные + комбинированные + readme
                         
-                        for i, layer in enumerate(color_layers):
-                            if st.session_state.layer_visibility[i]:
+                        # Сохраняем все слои
+                        for idx, layer in enumerate(color_layers):
+                            if st.session_state.layer_visibility[idx]:
                                 # Черно-белая маска
+                                progress_zip.progress((idx * 2) / total_files)
                                 bw_mask = create_bw_mask(layer, bg_color_rgb)
-                                mask_png = save_bw_mask_as_png(bw_mask, f"mask_{i+1}")
+                                mask_png = save_bw_mask_as_png(bw_mask, f"mask_{idx+1}")
                                 
                                 if mask_png:
-                                    mask_path = os.path.join(tmpdirname, f"layer_{i+1}_mask.png")
+                                    mask_path = os.path.join(tmpdirname, f"layer_{idx+1}_mask.png")
                                     with open(mask_path, 'wb') as f:
                                         f.write(mask_png)
                                     all_files.append(mask_path)
                                 
                                 # Цветной слой
+                                progress_zip.progress((idx * 2 + 1) / total_files)
                                 layer_rgb = cv2.cvtColor(layer, cv2.COLOR_BGR2RGB)
-                                color_png = convert_to_png(layer_rgb, f"layer_{i+1}")
+                                color_png = convert_to_png(layer_rgb, f"layer_{idx+1}")
                                 
                                 if color_png:
-                                    color_path = os.path.join(tmpdirname, f"layer_{i+1}_color.png")
+                                    color_path = os.path.join(tmpdirname, f"layer_{idx+1}_color.png")
                                     with open(color_path, 'wb') as f:
                                         f.write(color_png)
                                     all_files.append(color_path)
                         
                         # Сохраняем комбинированные изображения
+                        progress_zip.progress(0.8)
                         if combined_png_data:
                             combined_path = os.path.join(tmpdirname, "combined_mask.png")
                             with open(combined_path, 'wb') as f:
@@ -1235,12 +1227,14 @@ if st.session_state.uploaded_file is not None:
                             all_files.append(combined_color_path)
                         
                         # Создаем README файл
+                        progress_zip.progress(0.9)
                         readme_content = f"""# ColorSep Pro - Экспортированные слои
 
 Дата создания: {st.session_state.get('processing_time', 'Неизвестно')}
 Метод: {selected_method}
 Количество слоев: {len(color_layers)}
 Цвет фона: {bg_color}
+Видимых слоев: {sum(st.session_state.layer_visibility)}/{len(color_layers)}
 
 ## Содержимое архива:
 - Черно-белые маски каждого слоя (layer_X_mask.png)
@@ -1254,7 +1248,8 @@ if st.session_state.uploaded_file is not None:
                             hex_color = "#{:02x}{:02x}{:02x}".format(
                                 info['color'][2], info['color'][1], info['color'][0]
                             )
-                            readme_content += f"- Слой {i+1}: {hex_color}, RGB{info['color'][::-1]}, Покрытие: {info['percentage']:.1f}%\n"
+                            visibility = "Видимый" if st.session_state.layer_visibility[i] else "Скрытый"
+                            readme_content += f"- Слой {i+1} ({visibility}): {hex_color}, RGB{info.get('rgb_color', info['color'][::-1])}, Покрытие: {info['percentage']:.1f}%\n"
                         
                         readme_path = os.path.join(tmpdirname, "README.txt")
                         with open(readme_path, 'w', encoding='utf-8') as f:
@@ -1265,19 +1260,23 @@ if st.session_state.uploaded_file is not None:
                         zip_path = os.path.join(tmpdirname, "color_layers.zip")
                         with zipfile.ZipFile(zip_path, 'w') as zipf:
                             for file in all_files:
-                                zipf.write(file, os.path.basename(file))
+                                arcname = os.path.basename(file)
+                                zipf.write(file, arcname)
                         
                         # Читаем ZIP файл
                         with open(zip_path, "rb") as f:
                             zip_data = f.read()
                         
+                        progress_zip.progress(1.0)
+                        
                         # Предоставляем для скачивания
                         st.download_button(
                             label="⬇️ Скачать ZIP архив со всеми файлами",
                             data=zip_data,
-                            file_name="color_separation_layers.zip",
+                            file_name=f"color_separation_{uploaded_file.name.split('.')[0]}.zip",
                             mime="application/zip",
-                            key="download_all_zip"
+                            key="download_all_zip_final",
+                            use_container_width=True
                         )
 
 # ==================== ИНФОРМАЦИЯ О МЕТОДАХ ====================
@@ -1290,15 +1289,19 @@ col_method1, col_method2 = st.columns(2)
 with col_method1:
     st.markdown("""
     <div class="method-card">
-        <h4>🎯 K-средних кластеризация</h4>
+        <h4>🎯 K-средних кластеризация (рекомендуется)</h4>
         <p><strong>Описание:</strong> Классический алгоритм машинного обучения для группировки похожих цветов.</p>
         <p><strong>Преимущества:</strong></p>
         <ul>
-            <li>Быстрая обработка</li>
-            <li>Контролируемое количество цветов</li>
-            <li>Хорошо работает с четкими цветами</li>
+            <li>✅ Быстрая и стабильная работа</li>
+            <li>✅ Правильные цвета из вашего изображения</li>
+            <li>✅ Хорошо работает с фотографиями</li>
+            <li>✅ Не требует специальных моделей</li>
         </ul>
-        <p><strong>Идеально для:</strong> Логотипы, векторная графика, изображения с четкими цветами</p>
+        <p><strong>Идеально для:</strong> Фотографии, природные сцены, изображения с реалистичными цветами</p>
+        <div style='background-color: #e7f3ff; padding: 10px; border-radius: 5px; margin-top: 10px;'>
+            <strong>🎯 Рекомендуем для большинства случаев</strong>
+        </div>
     </div>
     """, unsafe_allow_html=True)
 
@@ -1306,31 +1309,30 @@ with col_method2:
     if model_available:
         st.markdown("""
         <div class="method-card">
-            <h4>⚡ Fast Soft Color Segmentation (полная реализация)</h4>
-            <p><strong>Описание:</strong> Полная реализация нейронной сети из оригинальной статьи.</p>
-            <p><strong>Преимущества:</strong></p>
+            <h4>⚡ Упрощенный нейронный метод</h4>
+            <p><strong>Описание:</strong> Упрощенная нейронная сеть для цветовой сегментации.</p>
+            <p><strong>Особенности:</strong></p>
             <ul>
-                <li>Использует обе нейронные сети (mask_generator + residue_predictor)</li>
-                <li>Создает слои с прозрачностью и плавными переходами</li>
-                <li>Высокая точность цветопередачи</li>
-                <li>Лучше работает с градиентами и сложными текстурами</li>
+                <li>⚠️ Требует модель mask_generator.pth</li>
+                <li>⚠️ Может давать неожиданные цвета</li>
+                <li>⚠️ Экспериментальный метод</li>
             </ul>
-            <p><strong>Идеально для:</strong> Фотографии, градиенты, сложные текстуры, художественные работы</p>
+            <p><strong>Используйте осторожно:</strong> Результаты могут отличаться от ожидаемых</p>
+            <div style='background-color: #fff3cd; padding: 10px; border-radius: 5px; margin-top: 10px;'>
+                <strong>⚠️ Экспериментальный - используйте K-means для надежных результатов</strong>
+            </div>
         </div>
         """, unsafe_allow_html=True)
     else:
         st.markdown("""
         <div class="method-card" style="border-left-color: #ffc107;">
-            <h4>⚡ Fast Soft Color Segmentation (полная реализация)</h4>
-            <p><strong>Статус:</strong> 🔒 Требуются модели</p>
-            <p>Для использования этого метода необходимо скачать файлы моделей и поместить их в папку <code>model/</code></p>
-            <p><strong>Преимущества метода:</strong></p>
-            <ul>
-                <li>Полная реализация нейронной сети из статьи</li>
-                <li>Высокая точность разделения цветов</li>
-                <li>Слои с альфа-каналами и плавными переходами</li>
-                <li>Идеально для сложных изображений</li>
-            </ul>
+            <h4>⚡ Упрощенный нейронный метод</h4>
+            <p><strong>Статус:</strong> 🔒 Требуется модель</p>
+            <p>Для использования этого метода необходимо скачать файл модели и поместить его в папку <code>model/</code></p>
+            <p><strong>Примечание:</strong> Этот метод может давать неожиданные результаты. Для большинства задач рекомендуется использовать K-means.</p>
+            <div style='background-color: #f8f9fa; padding: 10px; border-radius: 5px; margin-top: 10px;'>
+                <strong>💡 Совет: Используйте K-means для лучших результатов</strong>
+            </div>
         </div>
         """, unsafe_allow_html=True)
 
@@ -1338,37 +1340,73 @@ with col_method2:
 
 st.markdown("---")
 st.markdown("""
-<div style="text-align: center; color: #666; padding: 30px; background-color: #f8f9fa; border-radius: 10px;">
-    <h4>🎨 ColorSep Pro</h4>
-    <p>Профессиональный инструмент для разделения цветов</p>
-    <p style="font-size: 0.9em;">Поддерживаемые форматы: JPG, PNG, BMP, TIFF | Максимальный размер: 50MB</p>
-    <p style="font-size: 0.9em;">Все файлы экспортируются в формате PNG для промышленной совместимости</p>
+<div style="text-align: center; color: #666; padding: 30px; background-color: #f8f9fa; border-radius: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.05);">
+    <h4 style="color: #0056b3;">🎨 ColorSep Pro v2.0</h4>
+    <p style="font-size: 1.1em; margin-bottom: 10px;">Профессиональный инструмент для разделения цветов</p>
+    <div style="display: flex; justify-content: center; gap: 20px; margin: 20px 0;">
+        <div style="text-align: center;">
+            <div style="font-size: 1.5em; color: #0056b3;">📷</div>
+            <div>Поддержка JPG, PNG, BMP, TIFF</div>
+        </div>
+        <div style="text-align: center;">
+            <div style="font-size: 1.5em; color: #0056b3;">⚡</div>
+            <div>Быстрая обработка</div>
+        </div>
+        <div style="text-align: center;">
+            <div style="font-size: 1.5em; color: #0056b3;">🎯</div>
+            <div>Точные цвета</div>
+        </div>
+    </div>
+    <p style="font-size: 0.9em; color: #888; margin-top: 20px;">Все файлы экспортируются в формате PNG для промышленной совместимости</p>
+    <p style="font-size: 0.9em; color: #888;">Максимальный размер файла: 50MB</p>
 </div>
 """, unsafe_allow_html=True)
 
 # ==================== ПРОВЕРКА ЗАВИСИМОСТЕЙ ====================
 
 try:
-    # Проверяем основные зависимости
-    dependencies_ok = True
-    
-    # Проверка OpenCV
-    cv2_version = cv2.__version__
-    
-    # Проверка PyTorch
-    torch_version = torch.__version__
-    cuda_available = torch.cuda.is_available()
-    
-    # Проверка scikit-learn
-    from sklearn import __version__ as sklearn_version
-    
-    # Выводим информацию в sidebar
     with st.sidebar.expander("ℹ️ Информация о системе", expanded=False):
-        st.write(f"**OpenCV:** {cv2_version}")
-        st.write(f"**PyTorch:** {torch_version}")
-        st.write(f"**CUDA:** {'✅ Доступен' if cuda_available else '❌ Не доступен'}")
-        st.write(f"**scikit-learn:** {sklearn_version}")
+        st.write(f"**OpenCV:** {cv2.__version__}")
+        st.write(f"**PyTorch:** {torch.__version__}")
+        st.write(f"**CUDA доступен:** {'✅ Да' if torch.cuda.is_available() else '❌ Нет'}")
+        
+        # Проверка scikit-learn
+        try:
+            from sklearn import __version__ as sklearn_version
+            st.write(f"**scikit-learn:** {sklearn_version}")
+        except:
+            st.write("**scikit-learn:** ❌ Не установлен")
+        
         st.write(f"**Streamlit:** {st.__version__}")
+        
+        # Информация о памяти
+        import psutil
+        memory = psutil.virtual_memory()
+        st.write(f"**Оперативная память:** {memory.percent}% использовано")
         
 except Exception as e:
     st.sidebar.error(f"Ошибка проверки зависимостей: {e}")
+
+# ==================== СОВЕТЫ ПО ИСПОЛЬЗОВАНИЮ ====================
+
+with st.sidebar.expander("💡 Советы по использованию", expanded=False):
+    st.markdown("""
+    **🎯 Для лучших результатов:**
+    
+    1. **Используйте K-means** - дает самые точные цвета
+    2. **Оптимальное количество цветов:** 5-7 для фотографий
+    3. **Фон:** Укажите цвет фона если он однородный
+    4. **Качество:** Для печати используйте "Высокое качество"
+    
+    **⚠️ Если цвета искажаются:**
+    
+    1. Переключитесь на метод K-means
+    2. Уменьшите количество цветов
+    3. Укажите точный цвет фона
+    
+    **📁 Для экспорта:**
+    
+    - Черно-белые маски: для трафаретной печати
+    - Цветные слои: для цифровой печати
+    - ZIP архив: содержит все файлы + инструкцию
+    """)
