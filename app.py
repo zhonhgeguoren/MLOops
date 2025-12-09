@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 import streamlit as st
 import numpy as np
 import cv2
@@ -22,6 +24,17 @@ from pathlib import Path
 from pyora import Project
 import warnings
 warnings.filterwarnings('ignore')
+
+# ==================== ДОПОЛНИТЕЛЬНЫЕ ИМПОРТЫ ДЛЯ INKSPLIT ====================
+
+try:
+    from colormath.color_objects import sRGBColor, LabColor, LCHabColor
+    from colormath.color_conversions import convert_color
+    from colormath.color_diff import delta_e_cie1976
+    colormath_available = True
+except ImportError:
+    colormath_available = False
+    st.warning("⚠️ Библиотека colormath не установлена. Метод Inksplit будет ограничен.")
 
 # ==================== ПРОВЕРКА НАЛИЧИЯ МОДЕЛИ ====================
 
@@ -101,6 +114,13 @@ st.markdown("""
         margin-bottom: 20px;
         border-left: 5px solid #0056b3;
     }
+    .method-card-inksplit {
+        background-color: #e8f5e9;
+        border-radius: 10px;
+        padding: 20px;
+        margin-bottom: 20px;
+        border-left: 5px solid #4CAF50;
+    }
     .model-status-success {
         background-color: #d4edda;
         color: #155724;
@@ -144,6 +164,20 @@ st.markdown("""
         background-color: white;
         border-radius: 10px;
         border: 1px solid #ddd;
+    }
+    .inksplit-options {
+        background-color: #f0f7ff;
+        padding: 15px;
+        border-radius: 8px;
+        margin-bottom: 15px;
+        border: 1px solid #cce5ff;
+    }
+    .export-options {
+        background-color: #fff3e6;
+        padding: 15px;
+        border-radius: 8px;
+        margin-bottom: 15px;
+        border: 1px solid #ffd9b3;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -612,6 +646,204 @@ def kmeans_color_separation(img, n_colors=5, bg_color=(255, 255, 255), **kwargs)
         st.error(f"Ошибка в методе K-means: {str(e)}")
         return [], []
 
+# ==================== ФУНКЦИИ ДЛЯ МЕТОДА INKSPLIT ====================
+
+def find_closest_color_in_palette(target_color, palette_colors, batch_size=100):
+    """
+    Находит ближайший цвет в палитре с использованием цветовой метрики Delta E.
+    Аналог функции из плагина GIMP.
+    """
+    if not colormath_available:
+        # Упрощенная версия без colormath
+        target_color_rgb = np.array(target_color)
+        min_distance = float('inf')
+        closest_color = None
+        closest_color_name = None
+        
+        for color_name, color_rgb in palette_colors:
+            distance = np.linalg.norm(target_color_rgb - np.array(color_rgb))
+            if distance < min_distance:
+                min_distance = distance
+                closest_color = color_rgb
+                closest_color_name = color_name
+        
+        return closest_color_name, closest_color, min_distance
+    
+    # Полная версия с colormath
+    rgb = sRGBColor(target_color[0]/255, target_color[1]/255, target_color[2]/255, is_upscaled=False)
+    target_color_lab = convert_color(rgb, LabColor)
+
+    min_distance = float('inf')
+    closest_color = None
+    closest_color_name = None
+
+    for color_name, color_rgb in palette_colors:
+        rgb = sRGBColor(color_rgb[0]/255, color_rgb[1]/255, color_rgb[2]/255, is_upscaled=False)
+        color_lab = convert_color(rgb, LabColor)
+
+        distance = delta_e_cie1976(target_color_lab, color_lab)
+
+        if distance < min_distance:
+            min_distance = distance
+            closest_color = color_rgb
+            closest_color_name = color_name
+
+    return closest_color_name, closest_color, min_distance
+
+def inksplit_color_separation(
+    img, 
+    n_colors=5, 
+    bg_color=(255, 255, 255),
+    auto_color_match=True,
+    dithering=True,
+    generate_ub=True,
+    ub_threshold=0.35,
+    use_custom_palette=False,
+    custom_palette=None,
+    best_fit_match=False,
+    best_fit_palette=None,
+    **kwargs
+):
+    """
+    Реализация метода Inksplit для разделения цветов.
+    Основано на алгоритме плагина GIMP.
+    """
+    try:
+        # Создаем копию изображения для обработки
+        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        pil_img = Image.fromarray(img_rgb)
+        
+        # Уменьшаем количество цветов с помощью K-means для начальной палитры
+        pixels = img.reshape(-1, 3)
+        if bg_color:
+            bg_mask = np.all(pixels == bg_color, axis=1)
+            if np.any(bg_mask):
+                pixels = pixels[~bg_mask]
+        
+        if len(pixels) == 0:
+            st.warning("Изображение состоит только из фона")
+            return [], []
+        
+        # Используем K-means для создания базовой палитры
+        kmeans = KMeans(n_clusters=n_colors, random_state=42, n_init=10)
+        kmeans.fit(pixels)
+        
+        # Получаем цвета палитры
+        palette_colors = kmeans.cluster_centers_.astype(int)
+        
+        # Создаем слои
+        color_layers = []
+        color_info = []
+        
+        # Для каждого цвета в палитре создаем отдельный слой
+        for i, color in enumerate(palette_colors):
+            # Преобразуем цвет в RGB
+            color_rgb = (int(color[2]), int(color[1]), int(color[0]))
+            
+            # Создаем маску для текущего цвета
+            # Используем пороговое значение для поиска похожих цветов
+            color_diff = np.linalg.norm(img - color_rgb, axis=2)
+            mask = color_diff < 50  # Порог для определения цвета
+            
+            # Создаем слой
+            layer = np.full_like(img, bg_color)
+            layer[mask] = color_rgb
+            
+            # Если включено сглаживание
+            if dithering:
+                # Применяем простое сглаживание границ
+                kernel = np.ones((3,3), np.float32)/9
+                layer = cv2.filter2D(layer, -1, kernel)
+            
+            color_layers.append(layer)
+            
+            # Вычисляем информацию о цвете
+            coverage_percentage = (np.sum(mask) / mask.size) * 100
+            color_info.append({
+                'color': color_rgb,
+                'percentage': coverage_percentage,
+                'original_index': i
+            })
+        
+        # Сортируем слои по покрытию (от большего к меньшему)
+        sorted_indices = sorted(range(len(color_info)), 
+                              key=lambda x: color_info[x]['percentage'], 
+                              reverse=True)
+        
+        color_layers = [color_layers[i] for i in sorted_indices]
+        color_info = [color_info[i] for i in sorted_indices]
+        
+        # Создание подложки (Underbase), если требуется
+        if generate_ub:
+            ub_layer = np.full_like(img, bg_color)
+            
+            for i, (layer, info) in enumerate(zip(color_layers, color_info)):
+                # Создаем маску для текущего слоя
+                mask = np.any(layer != bg_color, axis=2)
+                
+                # Конвертируем цвет в LCH для проверки яркости
+                color_rgb_normalized = np.array(info['color']) / 255.0
+                
+                if colormath_available:
+                    # Используем colormath для точного расчета яркости
+                    rgb = sRGBColor(color_rgb_normalized[0], 
+                                   color_rgb_normalized[1], 
+                                   color_rgb_normalized[2], 
+                                   is_upscaled=False)
+                    lab = convert_color(rgb, LabColor)
+                    lch = convert_color(lab, LCHabColor)
+                    L = lch.lch_l / 100.0
+                else:
+                    # Упрощенный расчет яркости
+                    L = 0.299 * color_rgb_normalized[0] + \
+                        0.587 * color_rgb_normalized[1] + \
+                        0.114 * color_rgb_normalized[2]
+                
+                # Удаляем из подложки темные цвета
+                if L < ub_threshold:
+                    ub_layer[mask] = (0, 0, 0)  # Черный цвет для подложки
+            
+            # Добавляем слой подложки в начало списка
+            color_layers.insert(0, ub_layer)
+            color_info.insert(0, {
+                'color': (0, 0, 0),
+                'percentage': (np.sum(np.any(ub_layer != bg_color, axis=2)) / mask.size) * 100,
+                'is_underbase': True
+            })
+        
+        # Сопоставление с пользовательской палитрой, если требуется
+        if use_custom_palette and custom_palette:
+            color_matches = []
+            
+            for i, info in enumerate(color_info):
+                if 'is_underbase' in info and info['is_underbase']:
+                    color_matches.append("Underbase (черный)")
+                    continue
+                
+                closest_name, closest_color, distance = find_closest_color_in_palette(
+                    info['color'], custom_palette
+                )
+                
+                # Обновляем информацию о цвете
+                color_info[i]['matched_color'] = closest_color
+                color_info[i]['matched_name'] = closest_name
+                color_info[i]['match_distance'] = distance
+                
+                color_matches.append(f"{closest_name} (расстояние: {distance:.2f})")
+            
+            if color_matches:
+                st.info("Сопоставление цветов с палитрой:")
+                for i, match in enumerate(color_matches):
+                    st.write(f"Слой {i+1}: {match}")
+        
+        return color_layers, color_info
+    
+    except Exception as e:
+        st.error(f"Ошибка в методе Inksplit: {str(e)}")
+        import traceback
+        st.error(traceback.format_exc())
+        return [], []
+
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 
 def convert_to_png(image_array, filename):
@@ -674,6 +906,75 @@ def resize_layer_to_match(layer, target_shape):
     
     return cv2.resize(layer, (target_shape[1], target_shape[0]), interpolation=cv2.INTER_LINEAR)
 
+# ==================== ПРЕДОПРЕДЕЛЕННЫЕ ПАЛИТРЫ ДЛЯ INKSPLIT ====================
+
+def get_default_palettes():
+    """Возвращает предопределенные палитры для метода Inksplit"""
+    palettes = {
+        "Пантон (PANTONE)": [
+            ("PANTONE 186 C", (200, 16, 46)),
+            ("PANTONE 032 C", (255, 83, 73)),
+            ("PANTONE 021 C", (255, 184, 28)),
+            ("PANTONE 356 C", (0, 173, 68)),
+            ("PANTONE 293 C", (0, 56, 168)),
+            ("PANTONE 266 C", (96, 57, 147)),
+            ("PANTONE Black C", (35, 31, 32)),
+            ("PANTONE White", (255, 255, 255)),
+        ],
+        "CMYK (для печати)": [
+            ("Cyan", (0, 174, 239)),
+            ("Magenta", (236, 0, 140)),
+            ("Yellow", (255, 242, 0)),
+            ("Black", (35, 31, 32)),
+            ("White", (255, 255, 255)),
+        ],
+        "RGB": [
+            ("Red", (255, 0, 0)),
+            ("Green", (0, 255, 0)),
+            ("Blue", (0, 0, 255)),
+            ("Yellow", (255, 255, 0)),
+            ("Cyan", (0, 255, 255)),
+            ("Magenta", (255, 0, 255)),
+            ("Black", (0, 0, 0)),
+            ("White", (255, 255, 255)),
+        ],
+        "Spot Colors": [
+            ("Gold", (212, 175, 55)),
+            ("Silver", (192, 192, 192)),
+            ("Metallic Blue", (0, 51, 153)),
+            ("Fluorescent Pink", (255, 0, 255)),
+            ("Neon Green", (57, 255, 20)),
+        ]
+    }
+    return palettes
+
+def create_custom_palette_from_image(image, n_colors):
+    """Создает пользовательскую палитру из изображения"""
+    img_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    pixels = img_rgb.reshape(-1, 3)
+    
+    # Удаляем белый фон
+    bg_color = (255, 255, 255)
+    bg_mask = np.all(pixels == bg_color, axis=1)
+    if np.any(bg_mask):
+        pixels = pixels[~bg_mask]
+    
+    if len(pixels) == 0:
+        return []
+    
+    # Используем K-means для создания палитры
+    kmeans = KMeans(n_clusters=n_colors, random_state=42, n_init=10)
+    kmeans.fit(pixels)
+    
+    colors = kmeans.cluster_centers_.astype(int)
+    
+    # Создаем список цветов с именами
+    palette = []
+    for i, color in enumerate(colors):
+        palette.append((f"Цвет {i+1}", (int(color[0]), int(color[1]), int(color[2]))))
+    
+    return palette
+
 # ==================== БОКОВАЯ ПАНЕЛЬ ====================
 
 with st.sidebar:
@@ -690,7 +991,7 @@ with st.sidebar:
         
         # Выбор метода
         st.markdown("<h4>🎯 Выберите метод</h4>", unsafe_allow_html=True)
-        methods = ["K-средних кластеризация"]
+        methods = ["K-средних кластеризация", "Inksplit (для трафаретной печати)"]
         if model_available:
             methods.append("Fast Soft Color Segmentation (нейронная сеть)")
         
@@ -710,14 +1011,79 @@ with st.sidebar:
                                   label_visibility="collapsed")
         bg_color_rgb = tuple(int(bg_color.lstrip('#')[i:i+2], 16) for i in (0, 2, 4))
         
+        # Дополнительные настройки для Inksplit
+        if selected_method == "Inksplit (для трафаретной печати)":
+            st.markdown("<div class='inksplit-options'>", unsafe_allow_html=True)
+            st.markdown("<h4>🎨 Настройки Inksplit</h4>", unsafe_allow_html=True)
+            
+            # Основные опции Inksplit
+            auto_color_match = st.checkbox("Автоматическое определение цветов", True,
+                                         help="Автоматически определять цвета из изображения")
+            
+            dithering = st.checkbox("Сглаживание (dithering)", True,
+                                  help="Применять сглаживание для лучших переходов")
+            
+            generate_ub = st.checkbox("Создать подложку (Underbase)", True,
+                                    help="Создать черную подложку для темных цветов")
+            
+            if generate_ub:
+                ub_threshold = st.slider("Порог яркости для подложки", 0.0, 1.0, 0.35, 0.05,
+                                       help="Цвета темнее этого порога будут удалены из подложки")
+            
+            # Использование пользовательской палитры
+            use_custom_palette = st.checkbox("Использовать пользовательскую палитру", False,
+                                           help="Сопоставить цвета с предопределенной палитрой")
+            
+            if use_custom_palette:
+                palettes = get_default_palettes()
+                palette_names = list(palettes.keys())
+                selected_palette_name = st.selectbox("Выберите палитру", palette_names)
+                
+                if selected_palette_name:
+                    selected_palette = palettes[selected_palette_name]
+                    
+                    # Показать цвета палитры
+                    st.write("Цвета в палитре:")
+                    cols = st.columns(4)
+                    for idx, (color_name, color_rgb) in enumerate(selected_palette):
+                        with cols[idx % 4]:
+                            hex_color = "#{:02x}{:02x}{:02x}".format(*color_rgb)
+                            st.markdown(f"""
+                            <div style='text-align: center;'>
+                                <div style='width: 40px; height: 40px; background-color: {hex_color}; 
+                                         margin: 0 auto; border: 1px solid #000; border-radius: 5px;'></div>
+                                <div style='font-size: 0.8em;'>{color_name}</div>
+                            </div>
+                            """, unsafe_allow_html=True)
+                
+                best_fit_match = st.checkbox("Сопоставить с лучшим соответствием", True,
+                                           help="Найти ближайшие соответствия в палитре")
+            
+            st.markdown("</div>", unsafe_allow_html=True)
+            
+            # Настройки экспорта
+            st.markdown("<div class='export-options'>", unsafe_allow_html=True)
+            st.markdown("<h4>📤 Настройки экспорта</h4>", unsafe_allow_html=True)
+            
+            export_format = st.selectbox("Формат экспорта", ["PNG", "PDF", "SVG", "Все форматы"],
+                                       help="Выберите формат для экспорта слоев")
+            
+            include_labels = st.checkbox("Включить метки слоев", True,
+                                       help="Добавить текстовые метки к слоям")
+            
+            if include_labels:
+                label_font_size = st.slider("Размер шрифта меток", 10, 50, 20)
+            
+            st.markdown("</div>", unsafe_allow_html=True)
+        
         # Дополнительные настройки для нейронной сети
-        if selected_method == "Fast Soft Color Segmentation (нейронная сеть)" and model_available:
+        elif selected_method == "Fast Soft Color Segmentation (нейронная сеть)" and model_available:
             st.markdown("<h4>⚡ Настройки нейронной сети</h4>", unsafe_allow_html=True)
             resize_factor = st.slider("Масштаб", 0.5, 2.0, 1.0, 0.1,
                                      help="Коэффициент изменения размера для обработки",
                                      label_visibility="collapsed")
         
-        # Дополнительные опции
+        # Дополнительные опции для всех методов
         with st.expander("🛠️ Дополнительные настройки", expanded=False):
             st.markdown("<p style='color: #666; font-size: 0.9em;'>Эти настройки отключены по умолчанию для лучшей производительности</p>", 
                        unsafe_allow_html=True)
@@ -760,12 +1126,21 @@ if st.session_state.uploaded_file is not None:
     selected_method = st.session_state.selected_method
     
     # Показываем информацию о выбранном методе
-    st.markdown(f"""
-    <div class="method-card">
-        <h4>🎯 Выбранный метод: <strong>{selected_method}</strong></h4>
-        <p>📊 Количество цветов: <strong>{num_colors}</strong> | 🎨 Цвет фона: <span style='color: {bg_color}; font-weight: bold;'>{bg_color}</span></p>
-    </div>
-    """, unsafe_allow_html=True)
+    if selected_method == "Inksplit (для трафаретной печати)":
+        st.markdown(f"""
+        <div class="method-card-inksplit">
+            <h4>🎯 Выбранный метод: <strong>{selected_method}</strong></h4>
+            <p>📊 Количество цветов: <strong>{num_colors}</strong> | 🎨 Цвет фона: <span style='color: {bg_color}; font-weight: bold;'>{bg_color}</span></p>
+            <p>🚀 <em>Специализированный метод для трафаретной печати с поддержкой подложки и цветовых палитр</em></p>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        st.markdown(f"""
+        <div class="method-card">
+            <h4>🎯 Выбранный метод: <strong>{selected_method}</strong></h4>
+            <p>📊 Количество цветов: <strong>{num_colors}</strong> | 🎨 Цвет фона: <span style='color: {bg_color}; font-weight: bold;'>{bg_color}</span></p>
+        </div>
+        """, unsafe_allow_html=True)
     
     col1, col2 = st.columns([1, 2])
     
@@ -787,9 +1162,41 @@ if st.session_state.uploaded_file is not None:
             st.write(f"**Формат:** {image.format}")
             st.write(f"**Режим:** {image.mode}")
             st.write(f"**Размер файла:** {len(image_bytes) / 1024:.1f} KB")
+            
+            # Гистограмма цветов
+            if st.checkbox("Показать гистограмму цветов"):
+                img_array = np.array(image)
+                if img_array.shape[2] == 4:  # RGBA
+                    img_array = cv2.cvtColor(img_array, cv2.COLOR_RGBA2RGB)
+                
+                colors = ('r', 'g', 'b')
+                fig, ax = plt.subplots(figsize=(8, 4))
+                for i, color in enumerate(colors):
+                    histogram = cv2.calcHist([img_array], [i], None, [256], [0, 256])
+                    ax.plot(histogram, color=color)
+                
+                ax.set_xlim([0, 256])
+                ax.set_xlabel('Интенсивность цвета')
+                ax.set_ylabel('Количество пикселей')
+                ax.set_title('Гистограмма цветов RGB')
+                ax.grid(True, alpha=0.3)
+                st.pyplot(fig)
     
     with col2:
         st.markdown("<h3 class='sub-header'>🎨 Разделенные цветовые слои</h3>", unsafe_allow_html=True)
+        
+        # Подготовка параметров для метода Inksplit
+        inksplit_params = {}
+        if selected_method == "Inksplit (для трафаретной печати)":
+            inksplit_params = {
+                'auto_color_match': auto_color_match,
+                'dithering': dithering,
+                'generate_ub': generate_ub if 'generate_ub' in locals() else False,
+                'ub_threshold': ub_threshold if 'ub_threshold' in locals() else 0.35,
+                'use_custom_palette': use_custom_palette if 'use_custom_palette' in locals() else False,
+                'custom_palette': selected_palette if 'selected_palette' in locals() else None,
+                'best_fit_match': best_fit_match if 'best_fit_match' in locals() else False,
+            }
         
         # Кнопка для запуска обработки
         if st.button("🚀 Начать разделение цветов", type="primary", use_container_width=True):
@@ -801,6 +1208,15 @@ if st.session_state.uploaded_file is not None:
                             img_cv, 
                             n_colors=num_colors,
                             bg_color=bg_color_rgb
+                        )
+                    
+                    elif selected_method == "Inksplit (для трафаретной печати)":
+                        # Используем метод Inksplit
+                        color_layers, color_info = inksplit_color_separation(
+                            img_cv,
+                            n_colors=num_colors,
+                            bg_color=bg_color_rgb,
+                            **inksplit_params
                         )
                     
                     elif selected_method == "Fast Soft Color Segmentation (нейронная сеть)":
@@ -836,17 +1252,54 @@ if st.session_state.uploaded_file is not None:
                     
                     if color_layers and color_info:
                         st.success(f"✅ Успешно создано {len(color_layers)} цветовых слоев!")
+                        
+                        # Для метода Inksplit показываем дополнительную информацию
+                        if selected_method == "Inksplit (для трафаретной печати)":
+                            # Проверяем, есть ли подложка
+                            has_underbase = any('is_underbase' in info for info in color_info)
+                            if has_underbase:
+                                st.info("ℹ️ Создан слой подложки (Underbase). Темные цвета удалены из подложки для лучшей печати.")
+                            
+                            # Показываем сопоставление цветов, если использовалась палитра
+                            if use_custom_palette and 'selected_palette' in locals():
+                                st.info("🎨 Цвета сопоставлены с выбранной палитрой.")
                     else:
                         st.warning("⚠️ Не удалось создать цветовые слои. Попробуйте изменить параметры.")
                         
                 except Exception as e:
                     st.error(f"❌ Ошибка при обработке изображения: {str(e)}")
+                    import traceback
+                    st.error(traceback.format_exc())
         
         # Показываем результаты если они есть
         color_layers = st.session_state.color_layers
         color_info = st.session_state.color_info
         
         if color_layers and color_info:
+            # Для метода Inksplit показываем специальную информацию
+            if selected_method == "Inksplit (для трафаретной печати)":
+                # Определяем, есть ли подложка
+                has_underbase = any('is_underbase' in info for info in color_info)
+                underbase_index = None
+                
+                if has_underbase:
+                    for i, info in enumerate(color_info):
+                        if 'is_underbase' in info and info['is_underbase']:
+                            underbase_index = i
+                            break
+                
+                # Показываем предупреждение о подложке
+                if has_underbase and underbase_index is not None:
+                    st.warning(f"""
+                    ⚠️ **Внимание!** Слой {underbase_index + 1} - это подложка (Underbase). 
+                    
+                    **Рекомендации по печати:**
+                    - Подложка печатается первой
+                    - Используйте специальную белую или прозрачную краску для подложки
+                    - Остальные цвета печатаются поверх подложки
+                    - Подложка улучшает яркость светлых цветов на темных поверхностях
+                    """)
+            
             # Создаем вкладки для каждого слоя
             tabs = st.tabs([f"Слой {i+1}" for i in range(len(color_layers))])
             
@@ -857,7 +1310,17 @@ if st.session_state.uploaded_file is not None:
                     with col_left:
                         # Конвертация слоя из BGR в RGB для отображения
                         layer_rgb = cv2.cvtColor(layer, cv2.COLOR_BGR2RGB)
-                        st.image(layer_rgb, use_column_width=True)
+                        
+                        # Проверяем, является ли это подложкой
+                        is_underbase = 'is_underbase' in info and info['is_underbase']
+                        
+                        if is_underbase:
+                            # Для подложки показываем специальную информацию
+                            st.warning("🎨 **Слой подложки (Underbase)**")
+                            st.image(layer_rgb, use_column_width=True, 
+                                   caption="Черная подложка для темных цветов")
+                        else:
+                            st.image(layer_rgb, use_column_width=True)
                         
                         # Кнопки для скачивания
                         col_btn1, col_btn2 = st.columns(2)
@@ -868,14 +1331,18 @@ if st.session_state.uploaded_file is not None:
                             png_data = save_bw_mask_as_png(bw_mask, f"mask_{i+1}")
                             
                             if png_data:
-                                hex_color = "{:02x}{:02x}{:02x}".format(
-                                    info['color'][2], info['color'][1], info['color'][0]
-                                )
+                                # Определяем имя цвета для файла
+                                if 'matched_name' in info:
+                                    color_name = info['matched_name'].replace(" ", "_")
+                                elif is_underbase:
+                                    color_name = "Underbase"
+                                else:
+                                    color_name = f"color_{i+1}"
                                 
                                 st.download_button(
                                     label="⬇️ Скачать ЧБ маску",
                                     data=png_data,
-                                    file_name=f"layer_{i+1}_mask.png",
+                                    file_name=f"{color_name}_mask.png",
                                     mime="image/png",
                                     key=f"download_mask_{i}"
                                 )
@@ -884,40 +1351,78 @@ if st.session_state.uploaded_file is not None:
                             # Цветной слой
                             color_png_data = convert_to_png(layer_rgb, f"layer_{i+1}")
                             if color_png_data:
-                                hex_color = "{:02x}{:02x}{:02x}".format(
-                                    info['color'][2], info['color'][1], info['color'][0]
-                                )
+                                if 'matched_name' in info:
+                                    color_name = info['matched_name'].replace(" ", "_")
+                                elif is_underbase:
+                                    color_name = "Underbase"
+                                else:
+                                    color_name = f"color_{i+1}"
                                 
                                 st.download_button(
                                     label="⬇️ Скачать цветной слой",
                                     data=color_png_data,
-                                    file_name=f"layer_{i+1}_color.png",
+                                    file_name=f"{color_name}_color.png",
                                     mime="image/png",
                                     key=f"download_color_{i}"
                                 )
                     
                     with col_right:
                         # Информация о цвете
-                        hex_color = "#{:02x}{:02x}{:02x}".format(
-                            info['color'][2], info['color'][1], info['color'][0]
-                        )
-                        
-                        st.markdown(f"""
-                        <div style='padding: 15px; background-color: #f8f9fa; border-radius: 10px;'>
-                            <div style='display: flex; align-items: center; margin-bottom: 15px;'>
-                                <div class='color-chip' style='background-color: {hex_color};'></div>
-                                <div>
-                                    <strong style='font-size: 1.2em;'>{hex_color}</strong><br>
-                                    <span style='color: #666; font-size: 0.9em;'>Цвет слоя</span>
+                        if is_underbase:
+                            # Информация для подложки
+                            hex_color = "#000000"
+                            st.markdown(f"""
+                            <div style='padding: 15px; background-color: #fff3cd; border-radius: 10px; border: 2px solid #ffeaa7;'>
+                                <div style='display: flex; align-items: center; margin-bottom: 15px;'>
+                                    <div class='color-chip' style='background-color: {hex_color};'></div>
+                                    <div>
+                                        <strong style='font-size: 1.2em;'>Подложка (Underbase)</strong><br>
+                                        <span style='color: #666; font-size: 0.9em;'>Специальный слой</span>
+                                    </div>
+                                </div>
+                                <div style='margin-bottom: 10px;'>
+                                    <strong>Назначение:</strong> База для печати<br>
+                                    <strong>Цвет:</strong> Черный<br>
+                                    <strong>Покрытие:</strong> {info['percentage']:.1f}%<br>
+                                    <strong>Рекомендация:</strong> Печатать первым
                                 </div>
                             </div>
-                            <div style='margin-bottom: 10px;'>
-                                <strong>RGB:</strong> {info['color'][::-1]}<br>
-                                <strong>Покрытие:</strong> {info['percentage']:.1f}%<br>
-                                <strong>Пикселей:</strong> {layer.shape[1]} × {layer.shape[0]}
+                            """, unsafe_allow_html=True)
+                        else:
+                            # Определяем цвет для отображения
+                            if 'matched_color' in info:
+                                display_color = info['matched_color']
+                                color_name = info.get('matched_name', f'Цвет {i+1}')
+                            else:
+                                display_color = info['color']
+                                color_name = f'Цвет {i+1}'
+                            
+                            hex_color = "#{:02x}{:02x}{:02x}".format(
+                                display_color[0], display_color[1], display_color[2]
+                            )
+                            
+                            # Информация о расстоянии сопоставления
+                            match_info = ""
+                            if 'match_distance' in info:
+                                match_info = f"<br><strong>Сходство:</strong> {info['match_distance']:.2f}"
+                            
+                            st.markdown(f"""
+                            <div style='padding: 15px; background-color: #f8f9fa; border-radius: 10px;'>
+                                <div style='display: flex; align-items: center; margin-bottom: 15px;'>
+                                    <div class='color-chip' style='background-color: {hex_color};'></div>
+                                    <div>
+                                        <strong style='font-size: 1.2em;'>{color_name}</strong><br>
+                                        <span style='color: #666; font-size: 0.9em;'>{hex_color}</span>
+                                    </div>
+                                </div>
+                                <div style='margin-bottom: 10px;'>
+                                    <strong>RGB:</strong> {display_color}<br>
+                                    <strong>Покрытие:</strong> {info['percentage']:.1f}%<br>
+                                    <strong>Пикселей:</strong> {layer.shape[1]} × {layer.shape[0]}
+                                    {match_info}
+                                </div>
                             </div>
-                        </div>
-                        """, unsafe_allow_html=True)
+                            """, unsafe_allow_html=True)
             
             # ==================== КОМБИНИРОВАННЫЙ ПРЕДПРОСМОТР ====================
             
@@ -932,8 +1437,31 @@ if st.session_state.uploaded_file is not None:
                 if 'layer_visibility' not in st.session_state or len(st.session_state.layer_visibility) != len(color_layers):
                     st.session_state.layer_visibility = [True] * len(color_layers)
                 
+                # Для Inksplit устанавливаем подложку как видимую, но не изменяемую
+                if selected_method == "Inksplit (для трафаретной печати)":
+                    has_underbase = any('is_underbase' in info for info in color_info)
+                    if has_underbase:
+                        for i, info in enumerate(color_info):
+                            if 'is_underbase' in info and info['is_underbase']:
+                                st.session_state.layer_visibility[i] = True
+                                st.info(f"Слой {i+1} (подложка) всегда включен и находится внизу стека.")
+                
                 # Настройки для каждого слоя
                 for i in range(len(color_layers)):
+                    is_underbase = 'is_underbase' in color_info[i] and color_info[i]['is_underbase']
+                    
+                    if is_underbase:
+                        # Для подложки показываем фиксированные настройки
+                        st.markdown(f"""
+                        <div style='padding: 10px; background-color: #fff3cd; border-radius: 5px; margin-bottom: 10px;'>
+                            <strong>Слой {i+1} (Подложка)</strong> - фиксированная позиция (нижний слой)
+                            <div style='font-size: 0.9em; color: #666;'>
+                                Этот слой печатается первым и не может быть изменен
+                            </div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                        continue
+                    
                     col1, col2, col3 = st.columns([2, 1, 3])
                     
                     with col1:
@@ -959,14 +1487,22 @@ if st.session_state.uploaded_file is not None:
                     
                     with col3:
                         # Информация о цвете
+                        if 'matched_color' in color_info[i]:
+                            display_color = color_info[i]['matched_color']
+                            color_name = color_info[i].get('matched_name', f'Цвет {i+1}')
+                        else:
+                            display_color = color_info[i]['color']
+                            color_name = f'Цвет {i+1}'
+                        
                         hex_color = "#{:02x}{:02x}{:02x}".format(
-                            color_info[i]['color'][2], color_info[i]['color'][1], color_info[i]['color'][0]
+                            display_color[0], display_color[1], display_color[2]
                         )
+                        
                         st.markdown(f"""
                         <div style='display: flex; align-items: center; padding: 8px; background-color: {'#e8f5e9' if visibility else '#f5f5f5'}; border-radius: 5px;'>
                             <div style='width: 25px; height: 25px; background-color: {hex_color}; border: 1px solid #000; border-radius: 4px; margin-right: 10px;'></div>
                             <div>
-                                <div><strong>Слой {i+1}</strong></div>
+                                <div><strong>{color_name}</strong></div>
                                 <div style='font-size: 0.8em; color: #666;'>{hex_color} • {color_info[i]['percentage']:.1f}%</div>
                             </div>
                         </div>
@@ -975,16 +1511,34 @@ if st.session_state.uploaded_file is not None:
             # Создание комбинированного изображения
             combined = np.zeros_like(img_cv, dtype=np.uint8)
             
+            # Для Inksplit: подложка всегда внизу и включена
+            if selected_method == "Inksplit (для трафаретной печати)":
+                # Сначала находим и применяем подложку
+                for i, info in enumerate(color_info):
+                    if 'is_underbase' in info and info['is_underbase']:
+                        layer = color_layers[i]
+                        if layer.shape != combined.shape:
+                            layer = resize_layer_to_match(layer, combined.shape)
+                        
+                        mask = np.any(layer != bg_color_rgb, axis=2)
+                        combined[mask] = layer[mask]
+                        break
+            
             # Сортируем индексы по порядку (от нижнего к верхнему)
             sorted_indices = sorted(range(len(st.session_state.layer_order)), 
                                    key=lambda x: st.session_state.layer_order[x])
             
             # Применяем слои в правильном порядке
             for idx in sorted_indices:
+                # Пропускаем подложку в Inksplit, так как она уже применена
+                if selected_method == "Inksplit (для трафаретной печати)" and \
+                   'is_underbase' in color_info[idx] and color_info[idx]['is_underbase']:
+                    continue
+                
                 if st.session_state.layer_visibility[idx]:
                     layer = color_layers[idx]
                     
-                    # ИЗМЕНЕНИЕ: Проверяем размеры и изменяем при необходимости
+                    # Проверяем размеры и изменяем при необходимости
                     if layer.shape != combined.shape:
                         layer = resize_layer_to_match(layer, combined.shape)
                     
@@ -1016,7 +1570,7 @@ if st.session_state.uploaded_file is not None:
                 
                 for i, layer in enumerate(color_layers):
                     if st.session_state.layer_visibility[i]:
-                        # ИЗМЕНЕНИЕ: Проверяем размеры
+                        # Проверяем размеры
                         if layer.shape[:2] != combined_bw_mask.shape:
                             layer_resized = resize_layer_to_match(layer, combined_bw_mask.shape[:2] + (3,))
                         else:
@@ -1061,22 +1615,31 @@ if st.session_state.uploaded_file is not None:
                         
                         for i, layer in enumerate(color_layers):
                             if st.session_state.layer_visibility[i]:
+                                # Определяем имя для файла
+                                if selected_method == "Inksplit (для трафаретной печати)" and \
+                                   'is_underbase' in color_info[i] and color_info[i]['is_underbase']:
+                                    file_prefix = "Underbase"
+                                elif 'matched_name' in color_info[i]:
+                                    file_prefix = color_info[i]['matched_name'].replace(" ", "_")
+                                else:
+                                    file_prefix = f"layer_{i+1}"
+                                
                                 # Черно-белая маска
                                 bw_mask = create_bw_mask(layer, bg_color_rgb)
-                                mask_png = save_bw_mask_as_png(bw_mask, f"mask_{i+1}")
+                                mask_png = save_bw_mask_as_png(bw_mask, f"{file_prefix}_mask")
                                 
                                 if mask_png:
-                                    mask_path = os.path.join(tmpdirname, f"layer_{i+1}_mask.png")
+                                    mask_path = os.path.join(tmpdirname, f"{file_prefix}_mask.png")
                                     with open(mask_path, 'wb') as f:
                                         f.write(mask_png)
                                     all_files.append(mask_path)
                                 
                                 # Цветной слой
                                 layer_rgb = cv2.cvtColor(layer, cv2.COLOR_BGR2RGB)
-                                color_png = convert_to_png(layer_rgb, f"layer_{i+1}")
+                                color_png = convert_to_png(layer_rgb, f"{file_prefix}_color")
                                 
                                 if color_png:
-                                    color_path = os.path.join(tmpdirname, f"layer_{i+1}_color.png")
+                                    color_path = os.path.join(tmpdirname, f"{file_prefix}_color.png")
                                     with open(color_path, 'wb') as f:
                                         f.write(color_png)
                                     all_files.append(color_path)
@@ -1111,15 +1674,57 @@ if st.session_state.uploaded_file is not None:
 """
                         
                         for i, info in enumerate(color_info):
-                            hex_color = "#{:02x}{:02x}{:02x}".format(
-                                info['color'][2], info['color'][1], info['color'][0]
-                            )
-                            readme_content += f"- Слой {i+1}: {hex_color}, RGB{info['color'][::-1]}, Покрытие: {info['percentage']:.1f}%\n"
+                            if selected_method == "Inksplit (для трафаретной печати)" and \
+                               'is_underbase' in info and info['is_underbase']:
+                                readme_content += f"- Слой {i+1}: ПОДЛОЖКА (Underbase), Черный, Покрытие: {info['percentage']:.1f}%\n"
+                            else:
+                                if 'matched_color' in info:
+                                    display_color = info['matched_color']
+                                    color_name = info.get('matched_name', f'Цвет {i+1}')
+                                else:
+                                    display_color = info['color']
+                                    color_name = f'Цвет {i+1}'
+                                
+                                hex_color = "#{:02x}{:02x}{:02x}".format(
+                                    display_color[0], display_color[1], display_color[2]
+                                )
+                                
+                                match_info = ""
+                                if 'match_distance' in info:
+                                    match_info = f", Сходство: {info['match_distance']:.2f}"
+                                
+                                readme_content += f"- Слой {i+1}: {color_name}, {hex_color}, RGB{display_color}, Покрытие: {info['percentage']:.1f}%{match_info}\n"
                         
                         readme_path = os.path.join(tmpdirname, "README.txt")
                         with open(readme_path, 'w', encoding='utf-8') as f:
                             f.write(readme_content)
                         all_files.append(readme_path)
+                        
+                        # Создаем инструкцию по печати для Inksplit
+                        if selected_method == "Inksplit (для трафаретной печати)":
+                            instructions_content = """# ИНСТРУКЦИЯ ПО ПЕЧАТИ - Метод Inksplit
+
+## Порядок печати слоев:
+1. Подложка (Underbase) - печатается ПЕРВОЙ
+   - Используйте белую или прозрачную краску
+   - Служит основой для светлых цветов на темных поверхностях
+
+2. Цветные слои - печатаются ПОСЛЕ подложки
+   - Порядок печати соответствует порядку слоев в архиве
+   - Каждый слой печатается отдельно
+   - Дайте каждому слою высохнуть перед нанесением следующего
+
+## Рекомендации:
+- Используйте трафаретную печать (шелкографию)
+- Для подложки используйте специальную краску
+- Проведите тестовую печать на образце материала
+- Учитывайте настройки экспозиции для каждого слоя
+"""
+                            
+                            instructions_path = os.path.join(tmpdirname, "ПЕЧАТЬ_ИНСТРУКЦИЯ.txt")
+                            with open(instructions_path, 'w', encoding='utf-8') as f:
+                                f.write(instructions_content)
+                            all_files.append(instructions_path)
                         
                         # Создаем ZIP архив
                         zip_path = os.path.join(tmpdirname, "color_layers.zip")
@@ -1162,6 +1767,21 @@ with col_method1:
     </div>
     """, unsafe_allow_html=True)
 
+    st.markdown("""
+    <div class="method-card-inksplit">
+        <h4>🔧 Inksplit (для трафаретной печати)</h4>
+        <p><strong>Описание:</strong> Специализированный метод для подготовки к трафаретной печати.</p>
+        <p><strong>Преимущества:</strong></p>
+        <ul>
+            <li>Создание подложки (Underbase)</li>
+            <li>Сопоставление с палитрами Pantone/CMYK</li>
+            <li>Оптимизация для шелкографии</li>
+            <li>Поддержка сглаживания</li>
+        </ul>
+        <p><strong>Идеально для:</strong> Трафаретная печать, шелкография, текстиль</p>
+    </div>
+    """, unsafe_allow_html=True)
+
 with col_method2:
     if model_available:
         st.markdown("""
@@ -1191,6 +1811,30 @@ with col_method2:
             </ul>
         </div>
         """, unsafe_allow_html=True)
+    
+    # Дополнительная информация о методе Inksplit
+    st.markdown("""
+    <div class="method-card" style="border-left-color: #4CAF50;">
+        <h4>ℹ️ О методе Inksplit</h4>
+        <p><strong>Что такое подложка (Underbase)?</strong></p>
+        <p>Подложка - это специальный слой, который печатается первым и служит основой для светлых цветов на темных поверхностях.</p>
+        
+        <p><strong>Преимущества подложки:</strong></p>
+        <ul>
+            <li>Улучшает яркость светлых цветов</li>
+            <li>Повышает стойкость печати</li>
+            <li>Снижает влияние цвета материала</li>
+        </ul>
+        
+        <p><strong>Когда использовать Inksplit?</strong></p>
+        <ul>
+            <li>Печать на темных тканях</li>
+            <li>Шелкография на текстиле</li>
+            <li>Трафаретная печать</li>
+            <li>Профессиональная полиграфия</li>
+        </ul>
+    </div>
+    """, unsafe_allow_html=True)
 
 # ==================== ФУТЕР ====================
 
@@ -1201,6 +1845,7 @@ st.markdown("""
     <p>Профессиональный инструмент для разделения цветов</p>
     <p style="font-size: 0.9em;">Поддерживаемые форматы: JPG, PNG, BMP, TIFF | Максимальный размер: 50MB</p>
     <p style="font-size: 0.9em;">Все файлы экспортируются в формате PNG для промышленной совместимости</p>
+    <p style="font-size: 0.9em;">Метод Inksplit специально разработан для трафаретной печати и шелкографии</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -1220,12 +1865,19 @@ try:
     # Проверка scikit-learn
     from sklearn import __version__ as sklearn_version
     
+    # Проверка colormath
+    if colormath_available:
+        colormath_status = "✅ Доступен"
+    else:
+        colormath_status = "⚠️ Частично доступен (некоторые функции Inksplit ограничены)"
+    
     # Выводим информацию в sidebar
     with st.sidebar.expander("ℹ️ Информация о системе", expanded=False):
         st.write(f"**OpenCV:** {cv2_version}")
         st.write(f"**PyTorch:** {torch_version}")
         st.write(f"**CUDA:** {'✅ Доступен' if cuda_available else '❌ Не доступен'}")
         st.write(f"**scikit-learn:** {sklearn_version}")
+        st.write(f"**colormath:** {colormath_status}")
         st.write(f"**Streamlit:** {st.__version__}")
         
 except Exception as e:
