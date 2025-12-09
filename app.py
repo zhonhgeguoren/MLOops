@@ -24,6 +24,7 @@ from pathlib import Path
 from pyora import Project
 import warnings
 warnings.filterwarnings('ignore')
+import tifffile
 
 # ==================== ДОПОЛНИТЕЛЬНЫЕ ИМПОРТЫ ДЛЯ INKSPLIT ====================
 
@@ -844,67 +845,156 @@ def inksplit_color_separation(
         st.error(traceback.format_exc())
         return [], []
 
-# ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
+# ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ДЛЯ TIFF ====================
 
-def convert_to_png(image_array, filename):
-    """Конвертирует массив изображения в формат PNG"""
+def save_as_tiff(image_array, filename, dpi=300, compress=True):
+    """
+    Сохраняет изображение в формате TIFF без изменения размеров
+    с поддержкой прозрачности и разных цветовых пространств
+    """
     try:
-        fig, ax = plt.subplots(figsize=(10, 10))
-        ax.imshow(image_array)
-        ax.axis('off')
-        fig.tight_layout(pad=0)
+        if image_array is None:
+            st.error(f"Невозможно сохранить {filename}: изображение пустое")
+            return None
         
-        # Сохраняем как PNG
-        png_buffer = io.BytesIO()
-        plt.savefig(png_buffer, format='png', bbox_inches='tight', pad_inches=0, dpi=150)
-        plt.close(fig)
+        # Создаем буфер для записи
+        tiff_buffer = io.BytesIO()
         
-        png_buffer.seek(0)
-        return png_buffer.getvalue()
+        # Конвертируем в PIL Image для сохранения в TIFF
+        if len(image_array.shape) == 2:  # Градации серого (черно-белая маска)
+            # Если это маска, инвертируем для подложки (черный должен быть черным, белый - белым)
+            # Но для градаций серого оставляем как есть
+            pil_image = Image.fromarray(image_array, mode='L')
+        elif image_array.shape[2] == 3:  # RGB
+            pil_image = Image.fromarray(image_array, mode='RGB')
+        elif image_array.shape[2] == 4:  # RGBA
+            pil_image = Image.fromarray(image_array, mode='RGBA')
+        else:
+            st.error(f"Неподдерживаемый формат изображения: {image_array.shape}")
+            return None
+        
+        # Сохраняем как TIFF с сохранением оригинального размера
+        pil_image.save(tiff_buffer, format='TIFF', 
+                      dpi=(dpi, dpi),
+                      compression='tiff_lzw' if compress else None,
+                      save_all=True)
+        
+        tiff_buffer.seek(0)
+        return tiff_buffer.getvalue()
+    
     except Exception as e:
-        st.error(f"Ошибка при создании PNG: {e}")
+        st.error(f"Ошибка при создании TIFF: {e}")
+        import traceback
+        st.error(traceback.format_exc())
         return None
 
-def create_bw_mask(layer, bg_color):
+def create_bw_mask_tiff(layer, bg_color, is_underbase=False, is_black_contour=False):
     """
-    Создает черно-белую маску из цветного слоя.
-    Белый = область цвета, Черный = фон.
+    Создает черно-белую маску из цветного слоя с учетом особых случаев:
+    - Подложка (underbase): черный = область цвета, белый = фон
+    - Черный контур: белый = область цвета, черный = фон
+    - Обычные слои: белый = область цвета, черный = фон
     """
     # Создаем маску для определения фона
     is_background = np.all(layer == bg_color, axis=2)
     
-    # Создаем маску (255 для цвета, 0 для фона)
-    mask = np.zeros((layer.shape[0], layer.shape[1]), dtype=np.uint8)
-    mask[~is_background] = 255
+    # Создаем маску
+    if is_underbase:
+        # Для подложки: черный цвет там, где есть информация (область цвета)
+        # Белый фон
+        mask = np.zeros((layer.shape[0], layer.shape[1]), dtype=np.uint8)
+        mask[~is_background] = 0  # Черный для области цвета
+        mask[is_background] = 255  # Белый для фона
+    elif is_black_contour:
+        # Для черного контура: проверяем, является ли цвет черным или близким к черному
+        is_black = np.all(layer <= (30, 30, 30), axis=2)
+        mask = np.zeros((layer.shape[0], layer.shape[1]), dtype=np.uint8)
+        mask[is_black] = 255  # Белый для черных областей
+        mask[~is_black & ~is_background] = 0  # Черный для нечерных областей цвета
+        mask[is_background] = 0  # Черный для фона
+    else:
+        # Для обычных слоев: белый = область цвета, черный = фон
+        mask = np.zeros((layer.shape[0], layer.shape[1]), dtype=np.uint8)
+        mask[~is_background] = 255  # Белый для области цвета
+        mask[is_background] = 0  # Черный для фона
     
     return mask
 
-def save_bw_mask_as_png(mask, filename):
-    """Сохраняет черно-белую маску в формате PNG"""
+def save_color_layer_tiff(layer, bg_color, is_underbase=False):
+    """
+    Сохраняет цветной слой в формате TIFF
+    Для подложки: сохраняет как черный на прозрачном фоне
+    Для обычных слоев: сохраняет как есть
+    """
     try:
-        fig, ax = plt.subplots(figsize=(10, 10))
-        ax.imshow(mask, cmap='gray', vmin=0, vmax=255)
-        ax.axis('off')
-        fig.tight_layout(pad=0)
+        if is_underbase:
+            # Для подложки создаем изображение с черным цветом на прозрачном фоне
+            # Создаем маску где True = область подложки
+            is_color_area = np.any(layer != bg_color, axis=2)
+            
+            # Создаем RGBA изображение
+            rgba_image = np.zeros((layer.shape[0], layer.shape[1], 4), dtype=np.uint8)
+            
+            # Устанавливаем черный цвет (0,0,0,255) для областей подложки
+            rgba_image[is_color_area] = [0, 0, 0, 255]  # Черный, непрозрачный
+            
+            # Устанавливаем прозрачный фон
+            rgba_image[~is_color_area] = [0, 0, 0, 0]  # Прозрачный
+            
+            pil_image = Image.fromarray(rgba_image, mode='RGBA')
+        else:
+            # Для обычных слоев просто сохраняем как RGB
+            pil_image = Image.fromarray(layer, mode='RGB')
         
-        # Сохраняем как PNG
-        png_buffer = io.BytesIO()
-        plt.savefig(png_buffer, format='png', bbox_inches='tight', pad_inches=0, 
-                    dpi=300, facecolor='none', edgecolor='none')
-        plt.close(fig)
+        # Сохраняем в буфер
+        tiff_buffer = io.BytesIO()
+        pil_image.save(tiff_buffer, format='TIFF', 
+                      dpi=(300, 300),
+                      compression='tiff_lzw',
+                      save_all=True)
         
-        png_buffer.seek(0)
-        return png_buffer.getvalue()
+        tiff_buffer.seek(0)
+        return tiff_buffer.getvalue()
+    
     except Exception as e:
-        st.error(f"Ошибка при создании ЧБ маски PNG: {e}")
+        st.error(f"Ошибка при создании цветного TIFF: {e}")
         return None
 
-def resize_layer_to_match(layer, target_shape):
-    """Изменяет размер слоя до целевого размера"""
-    if layer.shape[:2] == target_shape[:2]:
+def save_bw_mask_as_tiff(mask, filename, dpi=300):
+    """Сохраняет черно-белую маску в формате TIFF без изменения размера"""
+    try:
+        # Проверяем размеры
+        if mask is None or mask.size == 0:
+            st.error(f"Маска {filename} пустая")
+            return None
+        
+        # Создаем PIL изображение с оригинальным размером
+        pil_image = Image.fromarray(mask, mode='L')
+        
+        # Сохраняем как TIFF с сохранением размера
+        tiff_buffer = io.BytesIO()
+        pil_image.save(tiff_buffer, format='TIFF',
+                      dpi=(dpi, dpi),
+                      compression='tiff_lzw')
+        
+        tiff_buffer.seek(0)
+        return tiff_buffer.getvalue()
+    
+    except Exception as e:
+        st.error(f"Ошибка при создании ЧБ маски TIFF: {e}")
+        return None
+
+def resize_layer_to_match_original(layer, original_shape):
+    """Изменяет размер слоя до оригинального размера изображения"""
+    if layer is None:
+        return None
+    
+    if layer.shape[:2] == original_shape[:2]:
         return layer
     
-    return cv2.resize(layer, (target_shape[1], target_shape[0]), interpolation=cv2.INTER_LINEAR)
+    # Используем интерполяцию для сохранения качества
+    return cv2.resize(layer, (original_shape[1], original_shape[0]), 
+                     interpolation=cv2.INTER_LINEAR)
 
 # ==================== ПРЕДОПРЕДЕЛЕННЫЕ ПАЛИТРЫ ДЛЯ INKSPLIT ====================
 
@@ -1061,25 +1151,27 @@ with st.sidebar:
             
             st.markdown("</div>", unsafe_allow_html=True)
             
-            # Настройки экспорта
+            # Настройки экспорта TIFF
             st.markdown("<div class='export-options'>", unsafe_allow_html=True)
-            st.markdown("<h4>📤 Настройки экспорта</h4>", unsafe_allow_html=True)
+            st.markdown("<h4>📤 Настройки экспорта TIFF</h4>", unsafe_allow_html=True)
             
-            export_format = st.selectbox("Формат экспорта", ["PNG", "PDF", "SVG", "Все форматы"],
-                                       help="Выберите формат для экспорта слоев")
+            tiff_dpi = st.slider("DPI для TIFF", 72, 600, 300, 72,
+                               help="Разрешение для сохранения TIFF файлов")
             
-            include_labels = st.checkbox("Включить метки слоев", True,
-                                       help="Добавить текстовые метки к слоям")
+            tiff_compression = st.selectbox("Сжатие TIFF", 
+                                           ["Нет", "LZW", "Deflate"],
+                                           index=1,
+                                           help="Тип сжатия для TIFF файлов")
             
-            if include_labels:
-                label_font_size = st.slider("Размер шрифта меток", 10, 50, 20)
+            preserve_alpha = st.checkbox("Сохранять альфа-канал", True,
+                                       help="Сохранять прозрачность в TIFF файлах")
             
             st.markdown("</div>", unsafe_allow_html=True)
         
         # Дополнительные настройки для нейронной сети
         elif selected_method == "Fast Soft Color Segmentation (нейронная сеть)" and model_available:
             st.markdown("<h4>⚡ Настройки нейронной сети</h4>", unsafe_allow_html=True)
-            resize_factor = st.slider("Масштаб", 0.5, 2.0, 1.0, 0.1,
+            resize_factor = st.slider("Масштаб обработки", 0.5, 2.0, 1.0, 0.1,
                                      help="Коэффициент изменения размера для обработки",
                                      label_visibility="collapsed")
         
@@ -1117,6 +1209,7 @@ st.markdown("""
     <h3>🚀 Начните работу</h3>
     <p>Загрузите изображение в формате JPG, PNG, BMP или TIFF</p>
     <p>Максимальный размер файла: 50 MB</p>
+    <p style="color: #0056b3; font-weight: bold;">📁 Экспорт в формате TIFF с сохранением оригинальных размеров</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -1132,6 +1225,7 @@ if st.session_state.uploaded_file is not None:
             <h4>🎯 Выбранный метод: <strong>{selected_method}</strong></h4>
             <p>📊 Количество цветов: <strong>{num_colors}</strong> | 🎨 Цвет фона: <span style='color: {bg_color}; font-weight: bold;'>{bg_color}</span></p>
             <p>🚀 <em>Специализированный метод для трафаретной печати с поддержкой подложки и цветовых палитр</em></p>
+            <p>📁 <strong>Экспорт: TIFF с сохранением оригинальных размеров</strong></p>
         </div>
         """, unsafe_allow_html=True)
     else:
@@ -1139,6 +1233,7 @@ if st.session_state.uploaded_file is not None:
         <div class="method-card">
             <h4>🎯 Выбранный метод: <strong>{selected_method}</strong></h4>
             <p>📊 Количество цветов: <strong>{num_colors}</strong> | 🎨 Цвет фона: <span style='color: {bg_color}; font-weight: bold;'>{bg_color}</span></p>
+            <p>📁 <strong>Экспорт: TIFF с сохранением оригинальных размеров</strong></p>
         </div>
         """, unsafe_allow_html=True)
     
@@ -1147,6 +1242,10 @@ if st.session_state.uploaded_file is not None:
     # Чтение изображения
     image_bytes = uploaded_file.getvalue()
     image = Image.open(io.BytesIO(image_bytes))
+    
+    # Сохраняем оригинальные размеры
+    original_width, original_height = image.size
+    st.session_state.original_size = (original_width, original_height)
     
     # Конвертация PIL Image в формат OpenCV
     img_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
@@ -1298,7 +1397,31 @@ if st.session_state.uploaded_file is not None:
                     - Используйте специальную белую или прозрачную краску для подложки
                     - Остальные цвета печатаются поверх подложки
                     - Подложка улучшает яркость светлых цветов на темных поверхностях
+                    - В TIFF файле подложка сохраняется как черный цвет на прозрачном фоне
                     """)
+            
+            # Проверяем наличие черного контура
+            has_black_contour = False
+            black_contour_indices = []
+            for i, info in enumerate(color_info):
+                if 'is_underbase' in info and info['is_underbase']:
+                    continue
+                
+                # Проверяем, является ли цвет черным или близким к черному
+                color = info.get('matched_color', info['color'])
+                if all(c <= 30 for c in color):  # Если все компоненты <= 30
+                    has_black_contour = True
+                    black_contour_indices.append(i)
+            
+            if has_black_contour:
+                st.info(f"""
+                🎨 **Обнаружен черный контур** (слои: {', '.join([str(i+1) for i in black_contour_indices])})
+                
+                **Особенности экспорта:**
+                - В градациях серого (TIFF) черный контур будет белым
+                - Черный фон будет черным
+                - Это стандарт для трафаретной печати
+                """)
             
             # Создаем вкладки для каждого слоя
             tabs = st.tabs([f"Слой {i+1}" for i in range(len(color_layers))])
@@ -1314,55 +1437,92 @@ if st.session_state.uploaded_file is not None:
                         # Проверяем, является ли это подложкой
                         is_underbase = 'is_underbase' in info and info['is_underbase']
                         
+                        # Проверяем, является ли это черным контуром
+                        is_black_contour = i in black_contour_indices
+                        
                         if is_underbase:
                             # Для подложки показываем специальную информацию
                             st.warning("🎨 **Слой подложки (Underbase)**")
                             st.image(layer_rgb, use_column_width=True, 
-                                   caption="Черная подложка для темных цветов")
+                                   caption="Черная подложка для темных цветов (в TIFF: черный на прозрачном)")
+                        elif is_black_contour:
+                            # Для черного контура показываем специальную информацию
+                            st.info("⚫ **Черный контур**")
+                            st.image(layer_rgb, use_column_width=True, 
+                                   caption="Черный контур (в градациях серого TIFF: белый)")
                         else:
                             st.image(layer_rgb, use_column_width=True)
                         
-                        # Кнопки для скачивания
+                        # Кнопки для скачивания TIFF
                         col_btn1, col_btn2 = st.columns(2)
                         
                         with col_btn1:
-                            # Черно-белая маска
-                            bw_mask = create_bw_mask(layer, bg_color_rgb)
-                            png_data = save_bw_mask_as_png(bw_mask, f"mask_{i+1}")
+                            # Черно-белая маска в TIFF
+                            bw_mask = create_bw_mask_tiff(
+                                layer, 
+                                bg_color_rgb,
+                                is_underbase=is_underbase,
+                                is_black_contour=is_black_contour
+                            )
                             
-                            if png_data:
+                            # Восстанавливаем оригинальный размер если нужно
+                            if bw_mask.shape[:2] != (original_height, original_width):
+                                bw_mask = resize_layer_to_match_original(
+                                    bw_mask[:, :, np.newaxis] if len(bw_mask.shape) == 2 else bw_mask,
+                                    (original_height, original_width, 1)
+                                )
+                                if len(bw_mask.shape) == 3:
+                                    bw_mask = bw_mask[:, :, 0]
+                            
+                            tiff_data = save_bw_mask_as_tiff(bw_mask, f"mask_{i+1}.tiff", dpi=300)
+                            
+                            if tiff_data:
                                 # Определяем имя цвета для файла
                                 if 'matched_name' in info:
                                     color_name = info['matched_name'].replace(" ", "_")
                                 elif is_underbase:
                                     color_name = "Underbase"
+                                elif is_black_contour:
+                                    color_name = "Black_Contour"
                                 else:
                                     color_name = f"color_{i+1}"
                                 
                                 st.download_button(
-                                    label="⬇️ Скачать ЧБ маску",
-                                    data=png_data,
-                                    file_name=f"{color_name}_mask.png",
-                                    mime="image/png",
+                                    label="⬇️ Скачать ЧБ маску (TIFF)",
+                                    data=tiff_data,
+                                    file_name=f"{color_name}_mask.tiff",
+                                    mime="image/tiff",
                                     key=f"download_mask_{i}"
                                 )
                         
                         with col_btn2:
-                            # Цветной слой
-                            color_png_data = convert_to_png(layer_rgb, f"layer_{i+1}")
-                            if color_png_data:
+                            # Цветной слой в TIFF
+                            # Восстанавливаем оригинальный размер если нужно
+                            layer_resized = layer
+                            if layer.shape[:2] != (original_height, original_width):
+                                layer_resized = resize_layer_to_match_original(layer, (original_height, original_width, 3))
+                            
+                            color_tiff_data = save_color_layer_tiff(
+                                layer_resized, 
+                                bg_color_rgb,
+                                is_underbase=is_underbase
+                            )
+                            
+                            if color_tiff_data:
                                 if 'matched_name' in info:
                                     color_name = info['matched_name'].replace(" ", "_")
                                 elif is_underbase:
                                     color_name = "Underbase"
+                                elif is_black_contour:
+                                    color_name = "Black_Contour"
                                 else:
                                     color_name = f"color_{i+1}"
                                 
                                 st.download_button(
-                                    label="⬇️ Скачать цветной слой",
-                                    data=color_png_data,
-                                    file_name=f"{color_name}_color.png",
-                                    mime="image/png",
+                                    label="⬇️ Скачать цветной слой (TIFF)",
+                                    data=color_tiff_data,
+                                    file_name=f"{color_name}_color.tiff",
+                                    mime="image/tiff",
                                     key=f"download_color_{i}"
                                 )
                     
@@ -1384,7 +1544,29 @@ if st.session_state.uploaded_file is not None:
                                     <strong>Назначение:</strong> База для печати<br>
                                     <strong>Цвет:</strong> Черный<br>
                                     <strong>Покрытие:</strong> {info['percentage']:.1f}%<br>
-                                    <strong>Рекомендация:</strong> Печатать первым
+                                    <strong>Экспорт TIFF:</strong> Черный на прозрачном<br>
+                                    <strong>Градации серого:</strong> Черный=0, Белый=255
+                                </div>
+                            </div>
+                            """, unsafe_allow_html=True)
+                        elif is_black_contour:
+                            # Информация для черного контура
+                            hex_color = "#000000"
+                            st.markdown(f"""
+                            <div style='padding: 15px; background-color: #e8f5e9; border-radius: 10px; border: 2px solid #4CAF50;'>
+                                <div style='display: flex; align-items: center; margin-bottom: 15px;'>
+                                    <div class='color-chip' style='background-color: {hex_color};'></div>
+                                    <div>
+                                        <strong style='font-size: 1.2em;'>Черный контур</strong><br>
+                                        <span style='color: #666; font-size: 0.9em;'>Особый слой</span>
+                                    </div>
+                                </div>
+                                <div style='margin-bottom: 10px;'>
+                                    <strong>RGB:</strong> {info['color']}<br>
+                                    <strong>Покрытие:</strong> {info['percentage']:.1f}%<br>
+                                    <strong>Экспорт TIFF:</strong> RGB как есть<br>
+                                    <strong>Градации серого:</strong> <span style='color: #d32f2f; font-weight: bold;'>Белый=255 (особенность для печати)</span><br>
+                                    <strong>Размер:</strong> {layer.shape[1]} × {layer.shape[0]} пикс.
                                 </div>
                             </div>
                             """, unsafe_allow_html=True)
@@ -1418,7 +1600,9 @@ if st.session_state.uploaded_file is not None:
                                 <div style='margin-bottom: 10px;'>
                                     <strong>RGB:</strong> {display_color}<br>
                                     <strong>Покрытие:</strong> {info['percentage']:.1f}%<br>
-                                    <strong>Пикселей:</strong> {layer.shape[1]} × {layer.shape[0]}
+                                    <strong>Экспорт TIFF:</strong> RGB как есть<br>
+                                    <strong>Градации серого:</strong> Белый=255, Черный=0<br>
+                                    <strong>Размер:</strong> {layer.shape[1]} × {layer.shape[0]} пикс.
                                     {match_info}
                                 </div>
                             </div>
@@ -1449,6 +1633,7 @@ if st.session_state.uploaded_file is not None:
                 # Настройки для каждого слоя
                 for i in range(len(color_layers)):
                     is_underbase = 'is_underbase' in color_info[i] and color_info[i]['is_underbase']
+                    is_black_contour = i in black_contour_indices
                     
                     if is_underbase:
                         # Для подложки показываем фиксированные настройки
@@ -1456,11 +1641,24 @@ if st.session_state.uploaded_file is not None:
                         <div style='padding: 10px; background-color: #fff3cd; border-radius: 5px; margin-bottom: 10px;'>
                             <strong>Слой {i+1} (Подложка)</strong> - фиксированная позиция (нижний слой)
                             <div style='font-size: 0.9em; color: #666;'>
-                                Этот слой печатается первым и не может быть изменен
+                                Этот слой печатается первым и не может быть изменен<br>
+                                В TIFF: черный на прозрачном фоне
                             </div>
                         </div>
                         """, unsafe_allow_html=True)
                         continue
+                    
+                    if is_black_contour:
+                        # Для черного контура показываем специальные настройки
+                        st.markdown(f"""
+                        <div style='padding: 10px; background-color: #e8f5e9; border-radius: 5px; margin-bottom: 10px;'>
+                            <strong>Слой {i+1} (Черный контур)</strong>
+                            <div style='font-size: 0.9em; color: #666;'>
+                                В градациях серого TIFF: белый цвет<br>
+                                Особенность для трафаретной печати
+                            </div>
+                        </div>
+                        """, unsafe_allow_html=True)
                     
                     col1, col2, col3 = st.columns([2, 1, 3])
                     
@@ -1518,7 +1716,7 @@ if st.session_state.uploaded_file is not None:
                     if 'is_underbase' in info and info['is_underbase']:
                         layer = color_layers[i]
                         if layer.shape != combined.shape:
-                            layer = resize_layer_to_match(layer, combined.shape)
+                            layer = resize_layer_to_match_original(layer, combined.shape)
                         
                         mask = np.any(layer != bg_color_rgb, axis=2)
                         combined[mask] = layer[mask]
@@ -1540,7 +1738,7 @@ if st.session_state.uploaded_file is not None:
                     
                     # Проверяем размеры и изменяем при необходимости
                     if layer.shape != combined.shape:
-                        layer = resize_layer_to_match(layer, combined.shape)
+                        layer = resize_layer_to_match_original(layer, combined.shape)
                     
                     # Создаем маску (где есть цвет, отличный от фона)
                     mask = np.any(layer != bg_color_rgb, axis=2)
@@ -1561,54 +1759,69 @@ if st.session_state.uploaded_file is not None:
                     caption=f"Предпросмотр {visible_layers}/{total_layers} видимых слоев", 
                     use_column_width=True)
             
-            # Кнопки для скачивания комбинированного изображения
+            # Кнопки для скачивания комбинированного изображения в TIFF
             col_comb1, col_comb2 = st.columns(2)
             
             with col_comb1:
-                # Черно-белая маска комбинированного изображения
-                combined_bw_mask = np.zeros((combined.shape[0], combined.shape[1]), dtype=np.uint8)
+                # Черно-белая маска комбинированного изображения в TIFF
+                combined_bw_mask = np.zeros((original_height, original_width), dtype=np.uint8)
                 
                 for i, layer in enumerate(color_layers):
                     if st.session_state.layer_visibility[i]:
-                        # Проверяем размеры
-                        if layer.shape[:2] != combined_bw_mask.shape:
-                            layer_resized = resize_layer_to_match(layer, combined_bw_mask.shape[:2] + (3,))
-                        else:
-                            layer_resized = layer
+                        # Восстанавливаем оригинальный размер
+                        layer_resized = layer
+                        if layer.shape[:2] != (original_height, original_width):
+                            layer_resized = resize_layer_to_match_original(layer, (original_height, original_width, 3))
                         
-                        layer_mask = create_bw_mask(layer_resized, bg_color_rgb)
+                        # Определяем тип маски
+                        is_underbase = 'is_underbase' in color_info[i] and color_info[i]['is_underbase']
+                        is_black_contour = i in black_contour_indices
+                        
+                        layer_mask = create_bw_mask_tiff(
+                            layer_resized, 
+                            bg_color_rgb,
+                            is_underbase=is_underbase,
+                            is_black_contour=is_black_contour
+                        )
+                        
+                        # Объединяем маски
                         combined_bw_mask = cv2.bitwise_or(combined_bw_mask, layer_mask)
                 
-                combined_png_data = save_bw_mask_as_png(combined_bw_mask, "combined_mask")
+                combined_tiff_data = save_bw_mask_as_tiff(combined_bw_mask, "combined_mask.tiff", dpi=300)
                 
-                if combined_png_data:
+                if combined_tiff_data:
                     st.download_button(
-                        label="⬇️ Скачать комбинированную ЧБ маску",
-                        data=combined_png_data,
-                        file_name="combined_mask.png",
-                        mime="image/png",
+                        label="⬇️ Скачать комбинированную ЧБ маску (TIFF)",
+                        data=combined_tiff_data,
+                        file_name="combined_mask.tiff",
+                        mime="image/tiff",
                         key="download_combined_mask"
                     )
             
             with col_comb2:
-                # Цветное комбинированное изображение
-                combined_color_png = convert_to_png(combined_rgb, "combined_preview")
-                if combined_color_png:
+                # Цветное комбинированное изображение в TIFF
+                # Восстанавливаем оригинальный размер
+                combined_resized = combined
+                if combined.shape[:2] != (original_height, original_width):
+                    combined_resized = resize_layer_to_match_original(combined, (original_height, original_width, 3))
+                
+                combined_color_tiff = save_color_layer_tiff(combined_resized, bg_color_rgb)
+                if combined_color_tiff:
                     st.download_button(
-                        label="⬇️ Скачать цветной предпросмотр",
-                        data=combined_color_png,
-                        file_name="combined_preview.png",
-                        mime="image/png",
+                        label="⬇️ Скачать цветной предпросмотр (TIFF)",
+                        data=combined_color_tiff,
+                        file_name="combined_preview.tiff",
+                        mime="image/tiff",
                         key="download_combined_color"
                     )
             
-            # ==================== ПАКЕТНОЕ СКАЧИВАНИЕ ====================
+            # ==================== ПАКЕТНОЕ СКАЧИВАНИЕ В TIFF ====================
             
             st.markdown("---")
-            st.markdown("<h3 class='sub-header'>📦 Пакетное скачивание</h3>", unsafe_allow_html=True)
+            st.markdown("<h3 class='sub-header'>📦 Пакетное скачивание в TIFF</h3>", unsafe_allow_html=True)
             
-            if st.button("📁 Создать ZIP-архив со всеми слоями", type="secondary", use_container_width=True):
-                with st.spinner("🔄 Создание архива..."):
+            if st.button("📁 Создать ZIP-архив со всеми слоями (TIFF)", type="secondary", use_container_width=True):
+                with st.spinner("🔄 Создание архива TIFF..."):
                     with tempfile.TemporaryDirectory() as tmpdirname:
                         # Сохраняем все слои
                         all_files = []
@@ -1619,56 +1832,96 @@ if st.session_state.uploaded_file is not None:
                                 if selected_method == "Inksplit (для трафаретной печати)" and \
                                    'is_underbase' in color_info[i] and color_info[i]['is_underbase']:
                                     file_prefix = "Underbase"
+                                elif i in black_contour_indices:
+                                    file_prefix = "Black_Contour"
                                 elif 'matched_name' in color_info[i]:
                                     file_prefix = color_info[i]['matched_name'].replace(" ", "_")
                                 else:
                                     file_prefix = f"layer_{i+1}"
                                 
-                                # Черно-белая маска
-                                bw_mask = create_bw_mask(layer, bg_color_rgb)
-                                mask_png = save_bw_mask_as_png(bw_mask, f"{file_prefix}_mask")
+                                # Восстанавливаем оригинальный размер
+                                layer_resized = layer
+                                if layer.shape[:2] != (original_height, original_width):
+                                    layer_resized = resize_layer_to_match_original(layer, (original_height, original_width, 3))
                                 
-                                if mask_png:
-                                    mask_path = os.path.join(tmpdirname, f"{file_prefix}_mask.png")
+                                # Черно-белая маска TIFF
+                                is_underbase = 'is_underbase' in color_info[i] and color_info[i]['is_underbase']
+                                is_black_contour = i in black_contour_indices
+                                
+                                bw_mask = create_bw_mask_tiff(
+                                    layer_resized, 
+                                    bg_color_rgb,
+                                    is_underbase=is_underbase,
+                                    is_black_contour=is_black_contour
+                                )
+                                
+                                mask_tiff = save_bw_mask_as_tiff(bw_mask, f"{file_prefix}_mask.tiff", dpi=300)
+                                
+                                if mask_tiff:
+                                    mask_path = os.path.join(tmpdirname, f"{file_prefix}_mask.tiff")
                                     with open(mask_path, 'wb') as f:
-                                        f.write(mask_png)
+                                        f.write(mask_tiff)
                                     all_files.append(mask_path)
                                 
-                                # Цветной слой
-                                layer_rgb = cv2.cvtColor(layer, cv2.COLOR_BGR2RGB)
-                                color_png = convert_to_png(layer_rgb, f"{file_prefix}_color")
+                                # Цветной слой TIFF
+                                color_tiff = save_color_layer_tiff(
+                                    layer_resized, 
+                                    bg_color_rgb,
+                                    is_underbase=is_underbase
+                                )
                                 
-                                if color_png:
-                                    color_path = os.path.join(tmpdirname, f"{file_prefix}_color.png")
+                                if color_tiff:
+                                    color_path = os.path.join(tmpdirname, f"{file_prefix}_color.tiff")
                                     with open(color_path, 'wb') as f:
-                                        f.write(color_png)
+                                        f.write(color_tiff)
                                     all_files.append(color_path)
                         
                         # Сохраняем комбинированные изображения
-                        if combined_png_data:
-                            combined_path = os.path.join(tmpdirname, "combined_mask.png")
+                        if combined_tiff_data:
+                            combined_path = os.path.join(tmpdirname, "combined_mask.tiff")
                             with open(combined_path, 'wb') as f:
-                                f.write(combined_png_data)
+                                f.write(combined_tiff_data)
                             all_files.append(combined_path)
                         
-                        if combined_color_png:
-                            combined_color_path = os.path.join(tmpdirname, "combined_preview.png")
+                        if combined_color_tiff:
+                            combined_color_path = os.path.join(tmpdirname, "combined_preview.tiff")
                             with open(combined_color_path, 'wb') as f:
-                                f.write(combined_color_png)
+                                f.write(combined_color_tiff)
                             all_files.append(combined_color_path)
                         
-                        # Создаем README файл
-                        readme_content = f"""# ColorSep Pro - Экспортированные слои
+                        # Сохраняем оригинальное изображение как TIFF для справки
+                        original_tiff = save_color_layer_tiff(img_cv, bg_color_rgb)
+                        if original_tiff:
+                            original_path = os.path.join(tmpdirname, "original_image.tiff")
+                            with open(original_path, 'wb') as f:
+                                f.write(original_tiff)
+                            all_files.append(original_path)
+                        
+                        # Создаем README файл с информацией о размерах
+                        readme_content = f"""# ColorSep Pro - Экспортированные слои (TIFF)
 
 Дата создания: {st.session_state.get('processing_time', 'Неизвестно')}
 Метод: {selected_method}
 Количество слоев: {len(color_layers)}
 Цвет фона: {bg_color}
 
+## Информация о размерах:
+- Оригинальное изображение: {original_width} × {original_height} пикселей
+- Все экспортированные TIFF файлы сохранены в оригинальном размере
+- Разрешение: 300 DPI
+- Формат: TIFF с сжатием LZW
+
 ## Содержимое архива:
-- Черно-белые маски каждого слоя (layer_X_mask.png)
-- Цветные изображения каждого слоя (layer_X_color.png)
-- Комбинированные изображения (combined_*.png)
+- Черно-белые маски каждого слоя (layer_X_mask.tiff)
+- Цветные изображения каждого слоя (layer_X_color.tiff)
+- Комбинированные изображения (combined_*.tiff)
+- Оригинальное изображение (original_image.tiff)
+
+## Особенности экспорта:
+- Подложка (Underbase): черный цвет на прозрачном фоне в цветном TIFF
+- Черный контур: в градациях серого TIFF сохранен как белый цвет
+- Обычные слои: белый=255, черный=0 в градациях серого
+- Все файлы сохранены без изменения размеров
 
 ## Информация о слоях:
 """
@@ -1677,6 +1930,12 @@ if st.session_state.uploaded_file is not None:
                             if selected_method == "Inksplit (для трафаретной печати)" and \
                                'is_underbase' in info and info['is_underbase']:
                                 readme_content += f"- Слой {i+1}: ПОДЛОЖКА (Underbase), Черный, Покрытие: {info['percentage']:.1f}%\n"
+                                readme_content += f"  → В цветном TIFF: черный на прозрачном фоне\n"
+                                readme_content += f"  → В ЧБ TIFF: черный=0, белый=255\n"
+                            elif i in black_contour_indices:
+                                readme_content += f"- Слой {i+1}: ЧЕРНЫЙ КОНТУР, {info['color']}, Покрытие: {info['percentage']:.1f}%\n"
+                                readme_content += f"  → В цветном TIFF: RGB как есть\n"
+                                readme_content += f"  → В ЧБ TIFF: <span style='color: red;'>белый=255 (особенность для печати)</span>\n"
                             else:
                                 if 'matched_color' in info:
                                     display_color = info['matched_color']
@@ -1694,6 +1953,20 @@ if st.session_state.uploaded_file is not None:
                                     match_info = f", Сходство: {info['match_distance']:.2f}"
                                 
                                 readme_content += f"- Слой {i+1}: {color_name}, {hex_color}, RGB{display_color}, Покрытие: {info['percentage']:.1f}%{match_info}\n"
+                                readme_content += f"  → В цветном TIFF: RGB как есть\n"
+                                readme_content += f"  → В ЧБ TIFF: белый=255, черный=0\n"
+                        
+                        readme_content += f"""
+                        
+## Техническая информация:
+- Формат файлов: TIFF
+- Цветовое пространство: RGB (цветные), Grayscale (ЧБ)
+- Сжатие: LZW (без потерь)
+- Разрешение: 300 DPI
+- Размеры сохранены: {original_width} × {original_height} пикселей
+- Программа: ColorSep Pro
+- Версия: 1.0
+"""
                         
                         readme_path = os.path.join(tmpdirname, "README.txt")
                         with open(readme_path, 'w', encoding='utf-8') as f:
@@ -1702,7 +1975,29 @@ if st.session_state.uploaded_file is not None:
                         
                         # Создаем инструкцию по печати для Inksplit
                         if selected_method == "Inksplit (для трафаретной печати)":
-                            instructions_content = """# ИНСТРУКЦИЯ ПО ПЕЧАТИ - Метод Inksplit
+                            instructions_content = f"""# ИНСТРУКЦИЯ ПО ПЕЧАТИ - Метод Inksplit
+
+## Информация о файлах:
+- Все файлы сохранены в формате TIFF
+- Оригинальный размер: {original_width} × {original_height} пикселей
+- Разрешение: 300 DPI
+- Черно-белые маски готовы для трафаретной печати
+
+## Особенности цветов в градациях серого:
+1. Подложка (Underbase):
+   - Черный цвет = область подложки
+   - Белый цвет = фон
+   - В печати: черные области = где будет нанесена подложка
+
+2. Черный контур:
+   - Белый цвет = область черного контура (особенность!)
+   - Черный цвет = фон
+   - В печати: белые области = где будет черная краска
+
+3. Обычные цвета:
+   - Белый цвет = область цвета
+   - Черный цвет = фон
+   - В печати: белые области = где будет цветная краска
 
 ## Порядок печати слоев:
 1. Подложка (Underbase) - печатается ПЕРВОЙ
@@ -1714,11 +2009,42 @@ if st.session_state.uploaded_file is not None:
    - Каждый слой печатается отдельно
    - Дайте каждому слою высохнуть перед нанесением следующего
 
-## Рекомендации:
-- Используйте трафаретную печать (шелкографию)
-- Для подложки используйте специальную краску
+3. Черный контур - обычно печатается последним
+   - Обратите внимание: в TIFF файле черный контур = белый цвет
+   - Это стандарт для трафаретной печати
+
+## Рекомендации по настройке печати:
+1. Размеры:
+   - Все файлы сохранены в оригинальном размере
+   - Убедитесь, что принтер настроен на 100% масштаб
+
+2. Разрешение:
+   - 300 DPI достаточно для большинства видов печати
+   - Для очень детальных изображений можно использовать 600 DPI
+
+3. Цвета:
+   - Черно-белые маски: используйте режим "Grayscale"
+   - Цветные слои: используйте режим "RGB"
+   - Подложка: черный на прозрачном фоне
+
+## Подготовка трафаретов:
+1. Для каждого слоя создайте отдельный трафарет
+2. Используйте черно-белые TIFF файлы как маски
+3. Белые области = где будет краска
+4. Черные области = где краски не будет
+5. Для подложки: черные области = где будет подложка
+
+## Тестирование:
 - Проведите тестовую печать на образце материала
+- Убедитесь, что все слои совмещаются правильно
+- Проверьте яркость и насыщенность цветов
 - Учитывайте настройки экспозиции для каждого слоя
+
+## Важные заметки:
+- Файлы TIFF сохранены без потери качества
+- Сжатие LZW уменьшает размер файлов без потерь
+- Все размеры сохранены точно
+- Черный контур специально инвертирован в градациях серого для удобства печати
 """
                             
                             instructions_path = os.path.join(tmpdirname, "ПЕЧАТЬ_ИНСТРУКЦИЯ.txt")
@@ -1727,7 +2053,7 @@ if st.session_state.uploaded_file is not None:
                             all_files.append(instructions_path)
                         
                         # Создаем ZIP архив
-                        zip_path = os.path.join(tmpdirname, "color_layers.zip")
+                        zip_path = os.path.join(tmpdirname, "color_layers_tiff.zip")
                         with zipfile.ZipFile(zip_path, 'w') as zipf:
                             for file in all_files:
                                 zipf.write(file, os.path.basename(file))
@@ -1738,11 +2064,11 @@ if st.session_state.uploaded_file is not None:
                         
                         # Предоставляем для скачивания
                         st.download_button(
-                            label="⬇️ Скачать ZIP архив со всеми файлами",
+                            label="⬇️ Скачать ZIP архив со всеми TIFF файлами",
                             data=zip_data,
-                            file_name="color_separation_layers.zip",
+                            file_name="color_separation_layers_tiff.zip",
                             mime="application/zip",
-                            key="download_all_zip"
+                            key="download_all_tiff_zip"
                         )
 
 # ==================== ИНФОРМАЦИЯ О МЕТОДАХ ====================
@@ -1764,6 +2090,7 @@ with col_method1:
             <li>Хорошо работает с четкими цветами</li>
         </ul>
         <p><strong>Идеально для:</strong> Логотипы, векторная графика, изображения с четкими цветами</p>
+        <p><strong>Экспорт:</strong> TIFF с сохранением оригинальных размеров</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -1779,6 +2106,7 @@ with col_method1:
             <li>Поддержка сглаживания</li>
         </ul>
         <p><strong>Идеально для:</strong> Трафаретная печать, шелкография, текстиль</p>
+        <p><strong>Экспорт:</strong> TIFF с особенностями для печати (подложка, черный контур)</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -1795,6 +2123,7 @@ with col_method2:
                 <li>Лучше работает с градиентами</li>
             </ul>
             <p><strong>Идеально для:</strong> Фотографии, градиенты, сложные текстуры</p>
+            <p><strong>Экспорт:</strong> TIFF с сохранением альфа-каналов</p>
         </div>
         """, unsafe_allow_html=True)
     else:
@@ -1809,29 +2138,39 @@ with col_method2:
                 <li>Слои с альфа-каналами</li>
                 <li>Идеально для сложных изображений</li>
             </ul>
+            <p><strong>Экспорт:</strong> TIFF с поддержкой прозрачности</p>
         </div>
         """, unsafe_allow_html=True)
     
-    # Дополнительная информация о методе Inksplit
+    # Дополнительная информация о формате TIFF
     st.markdown("""
-    <div class="method-card" style="border-left-color: #4CAF50;">
-        <h4>ℹ️ О методе Inksplit</h4>
-        <p><strong>Что такое подложка (Underbase)?</strong></p>
-        <p>Подложка - это специальный слой, который печатается первым и служит основой для светлых цветов на темных поверхностях.</p>
-        
-        <p><strong>Преимущества подложки:</strong></p>
+    <div class="method-card" style="border-left-color: #2196F3;">
+        <h4>ℹ️ О формате TIFF</h4>
+        <p><strong>Преимущества TIFF для печати:</strong></p>
         <ul>
-            <li>Улучшает яркость светлых цветов</li>
-            <li>Повышает стойкость печати</li>
-            <li>Снижает влияние цвета материала</li>
+            <li>Без потерь качества</li>
+            <li>Поддержка высоких разрешений</li>
+            <li>Сохранение оригинальных размеров</li>
+            <li>Поддержка прозрачности (альфа-канал)</li>
+            <li>Промышленный стандарт для полиграфии</li>
         </ul>
         
-        <p><strong>Когда использовать Inksplit?</strong></p>
+        <p><strong>Особенности экспорта в этом приложении:</strong></p>
         <ul>
-            <li>Печать на темных тканях</li>
-            <li>Шелкография на текстиле</li>
-            <li>Трафаретная печать</li>
-            <li>Профессиональная полиграфия</li>
+            <li>Все файлы сохраняются в оригинальном размере</li>
+            <li>Разрешение: 300 DPI (настраиваемое)</li>
+            <li>Сжатие: LZW (без потерь)</li>
+            <li>Подложка: черный на прозрачном фоне</li>
+            <li>Черный контур: белый в градациях серого</li>
+            <li>Обычные слои: стандартное кодирование</li>
+        </ul>
+        
+        <p><strong>Рекомендации:</strong></p>
+        <ul>
+            <li>Используйте TIFF для профессиональной печати</li>
+            <li>Сохраняйте оригинальные размеры для точности</li>
+            <li>300 DPI достаточно для большинства задач</li>
+            <li>Сжатие LZW уменьшает размер без потерь качества</li>
         </ul>
     </div>
     """, unsafe_allow_html=True)
@@ -1841,11 +2180,11 @@ with col_method2:
 st.markdown("---")
 st.markdown("""
 <div style="text-align: center; color: #666; padding: 30px; background-color: #f8f9fa; border-radius: 10px;">
-    <h4>🎨 ColorSep Pro</h4>
-    <p>Профессиональный инструмент для разделения цветов</p>
-    <p style="font-size: 0.9em;">Поддерживаемые форматы: JPG, PNG, BMP, TIFF | Максимальный размер: 50MB</p>
-    <p style="font-size: 0.9em;">Все файлы экспортируются в формате PNG для промышленной совместимости</p>
+    <h4>🎨 ColorSep Pro - Профессиональное разделение цветов</h4>
+    <p>Поддерживаемые форматы загрузки: JPG, PNG, BMP, TIFF | Максимальный размер: 50MB</p>
+    <p style="font-size: 0.9em; color: #0056b3; font-weight: bold;">📁 Экспорт в формате TIFF с сохранением оригинальных размеров</p>
     <p style="font-size: 0.9em;">Метод Inksplit специально разработан для трафаретной печати и шелкографии</p>
+    <p style="font-size: 0.9em;">Все файлы экспортируются в формате TIFF для промышленной совместимости</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -1865,6 +2204,10 @@ try:
     # Проверка scikit-learn
     from sklearn import __version__ as sklearn_version
     
+    # Проверка tifffile
+    import tifffile as tf
+    tifffile_version = tf.__version__ if hasattr(tf, '__version__') else "неизвестно"
+    
     # Проверка colormath
     if colormath_available:
         colormath_status = "✅ Доступен"
@@ -1877,6 +2220,7 @@ try:
         st.write(f"**PyTorch:** {torch_version}")
         st.write(f"**CUDA:** {'✅ Доступен' if cuda_available else '❌ Не доступен'}")
         st.write(f"**scikit-learn:** {sklearn_version}")
+        st.write(f"**tifffile:** {tifffile_version}")
         st.write(f"**colormath:** {colormath_status}")
         st.write(f"**Streamlit:** {st.__version__}")
         
