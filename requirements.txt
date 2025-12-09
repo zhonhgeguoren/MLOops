@@ -1,5 +1,9 @@
+# Системные зависимости для OpenCV (устанавливаются через !apt в Codespace)
+# !apt-get update && apt-get install -y libgl1-mesa-glx libglib2.0-0 libsm6 libxext6 libxrender-dev
+
+# Python зависимости
 streamlit>=1.29.0
-opencv-python-headless>=4.8.0
+opencv-python-headless>=4.8.0  # Используем headless версию
 numpy>=1.24.0
 scikit-learn>=1.4.0
 scikit-image>=0.22.0
@@ -16,9 +20,11 @@ tqdm
 seaborn
 colorama
 packaging
-scipy>=1.11.0  # Добавить для математических операций
-threadpoolctl>=3.2.0  # Для управления потоками в scikit-learn
-joblib>=1.3.0  # Для параллельных вычислений
-networkx>=3.1  # Может потребоваться для scikit-image
-imageio>=2.31.0  # Для работы с изображениями
-opencv-contrib-python>=4.8.0  # Для дополнительных функций OpenCV
+scipy>=1.11.0
+threadpoolctl>=3.2.0
+joblib>=1.3.0
+networkx>=3.1
+imageio>=2.31.0
+colormath>=3.0.0  # Добавьте это для метода Inksplit
+markdown-it-py>=4.0.0  # Для рендеринга markdown в Streamlit
+pyyaml>=6.0  # Для конфигурационных файлов
