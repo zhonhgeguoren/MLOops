@@ -177,6 +177,13 @@ st.markdown("""
         margin-bottom: 15px;
         border: 1px solid #ffd9b3;
     }
+    .fast-soft-options {
+        background-color: #f0f4ff;
+        padding: 15px;
+        border-radius: 8px;
+        margin-bottom: 15px;
+        border: 1px solid #ccd9ff;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -228,6 +235,9 @@ if 'selected_method' not in st.session_state:
 
 if 'combined_preview' not in st.session_state:
     st.session_state.combined_preview = None
+
+if 'decompose_layers' not in st.session_state:
+    st.session_state.decompose_layers = []
 
 # ==================== КЛАССЫ ДЛЯ МЕТОДА DECOMPOSE ====================
 
@@ -514,7 +524,7 @@ def decompose_layers_to_cv_format(decompose_layers, bg_color):
             rgb_array = rgba_array[:, :, :3]
             alpha_array = rgba_array[:, :, 3] / 255.0
             
-            # Создаем слой с прозрачностью на белом фоне
+            # Создаем слой с прозрачностью на указанном фоне
             layer_with_bg = np.zeros_like(rgb_array, dtype=np.uint8)
             
             # Применяем альфа-канал
@@ -547,7 +557,9 @@ def decompose_layers_to_cv_format(decompose_layers, bg_color):
             cv_layers.append(bgr_layer)
             color_info_list.append({
                 'color': median_color_bgr,
-                'percentage': coverage_percentage
+                'percentage': coverage_percentage,
+                'is_decompose_layer': True,
+                'alpha_channel': alpha_array
             })
         else:
             # Если слой RGB (без альфа), просто конвертируем
@@ -572,10 +584,29 @@ def decompose_layers_to_cv_format(decompose_layers, bg_color):
             cv_layers.append(bgr_layer)
             color_info_list.append({
                 'color': dominant_color_bgr,
-                'percentage': coverage_percentage
+                'percentage': coverage_percentage,
+                'is_decompose_layer': True
             })
     
     return cv_layers, color_info_list
+
+def create_bw_mask_for_decompose(layer_rgb, alpha_channel, bg_color, threshold=0.1):
+    """
+    Создает черно-белую маску для слоя decompose.
+    Белый (255) = область цвета, Черный (0) = фон.
+    Учитывает альфа-канал для определения непрозрачных областей.
+    """
+    # Создаем маску на основе альфа-канала
+    if alpha_channel is not None:
+        # Используем порог для альфа-канала
+        mask = (alpha_channel > threshold).astype(np.uint8) * 255
+    else:
+        # Если нет альфа-канала, используем цветовое различие от фона
+        is_background = np.all(layer_rgb == bg_color, axis=2)
+        mask = np.zeros((layer_rgb.shape[0], layer_rgb.shape[1]), dtype=np.uint8)
+        mask[~is_background] = 255
+    
+    return mask
 
 # ==================== ФУНКЦИИ ДЛЯ МЕТОДА K-MEANS ====================
 
@@ -631,10 +662,14 @@ def kmeans_color_separation(img, n_colors=5, bg_color=(255, 255, 255), **kwargs)
             layer[mask] = cluster_color
             
             color_layers.append(layer)
+            
+            # Конвертируем цвет в RGB для отображения
+            rgb_color = (int(cluster_color[2]), 
+                        int(cluster_color[1]), 
+                        int(cluster_color[0]))
+            
             color_info.append({
-                'color': (int(cluster_color[0]), 
-                         int(cluster_color[1]), 
-                         int(cluster_color[2])),
+                'color': rgb_color,
                 'percentage': (np.sum(mask) / mask.size) * 100
             })
         
@@ -845,16 +880,22 @@ def inksplit_color_separation(
 # ==================== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ====================
 
 def convert_to_png(image_array, filename):
-    """Конвертирует массив изображения в формат PNG"""
+    """Конвертирует массив изображения в формат PNG с сохранением размера"""
     try:
-        fig, ax = plt.subplots(figsize=(10, 10))
+        # Создаем фигуру с правильным размером
+        dpi = 100
+        height, width = image_array.shape[:2]
+        figsize = width / dpi, height / dpi
+        
+        fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
         ax.imshow(image_array)
         ax.axis('off')
         fig.tight_layout(pad=0)
         
-        # Сохраняем как PNG
+        # Сохраняем как PNG с сохранением размера
         png_buffer = io.BytesIO()
-        plt.savefig(png_buffer, format='png', bbox_inches='tight', pad_inches=0, dpi=150)
+        plt.savefig(png_buffer, format='png', bbox_inches='tight', 
+                   pad_inches=0, dpi=dpi)
         plt.close(fig)
         
         png_buffer.seek(0)
@@ -863,11 +904,55 @@ def convert_to_png(image_array, filename):
         st.error(f"Ошибка при создании PNG: {e}")
         return None
 
-def create_bw_mask(layer, bg_color):
+def convert_to_tiff(image_array, filename):
+    """Конвертирует массив изображения в формат TIFF с сохранением размера"""
+    try:
+        # Конвертируем numpy array в PIL Image
+        if len(image_array.shape) == 2:  # Черно-белое изображение
+            pil_img = Image.fromarray(image_array, mode='L')
+        else:  # Цветное изображение
+            if image_array.shape[2] == 3:  # RGB
+                pil_img = Image.fromarray(image_array, mode='RGB')
+            elif image_array.shape[2] == 4:  # RGBA
+                pil_img = Image.fromarray(image_array, mode='RGBA')
+            else:
+                # Конвертируем BGR в RGB
+                rgb_array = cv2.cvtColor(image_array, cv2.COLOR_BGR2RGB)
+                pil_img = Image.fromarray(rgb_array, mode='RGB')
+        
+        # Сохраняем в TIFF
+        tiff_buffer = io.BytesIO()
+        pil_img.save(tiff_buffer, format='TIFF', 
+                    compression='tiff_lzw',  # Сжатие без потерь
+                    dpi=(300, 300))  # Высокое разрешение для печати
+        tiff_buffer.seek(0)
+        return tiff_buffer.getvalue()
+    except Exception as e:
+        st.error(f"Ошибка при создании TIFF: {e}")
+        return None
+
+def create_bw_mask(layer, bg_color, method='kmeans'):
     """
     Создает черно-белую маску из цветного слоя.
-    Белый = область цвета, Черный = фон.
+    Белый (255) = область цвета, Черный (0) = фон.
+    
+    Для метода decompose использует альфа-канал.
     """
+    if method == 'decompose':
+        # Для decompose используем альфа-канал из session state
+        layer_idx = -1
+        for i, layer_cv in enumerate(st.session_state.color_layers):
+            if np.array_equal(layer_cv, layer):
+                layer_idx = i
+                break
+        
+        if layer_idx >= 0 and 'alpha_channel' in st.session_state.color_info[layer_idx]:
+            alpha_channel = st.session_state.color_info[layer_idx]['alpha_channel']
+            threshold = 0.1
+            mask = (alpha_channel > threshold).astype(np.uint8) * 255
+            return mask
+    
+    # Стандартный метод для K-means и Inksplit
     # Создаем маску для определения фона
     is_background = np.all(layer == bg_color, axis=2)
     
@@ -877,10 +962,32 @@ def create_bw_mask(layer, bg_color):
     
     return mask
 
+def save_bw_mask_as_tiff(mask, filename):
+    """Сохраняет черно-белую маску в формате TIFF"""
+    try:
+        # Создаем PIL Image
+        pil_img = Image.fromarray(mask, mode='L')
+        
+        # Сохраняем как TIFF
+        tiff_buffer = io.BytesIO()
+        pil_img.save(tiff_buffer, format='TIFF', 
+                    compression='tiff_lzw',  # Сжатие без потерь
+                    dpi=(300, 300))  # Высокое разрешение для печати
+        tiff_buffer.seek(0)
+        return tiff_buffer.getvalue()
+    except Exception as e:
+        st.error(f"Ошибка при создании ЧБ маски TIFF: {e}")
+        return None
+
 def save_bw_mask_as_png(mask, filename):
     """Сохраняет черно-белую маску в формате PNG"""
     try:
-        fig, ax = plt.subplots(figsize=(10, 10))
+        # Создаем фигуру с правильным размером
+        dpi = 300
+        height, width = mask.shape
+        figsize = width / dpi, height / dpi
+        
+        fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
         ax.imshow(mask, cmap='gray', vmin=0, vmax=255)
         ax.axis('off')
         fig.tight_layout(pad=0)
@@ -888,7 +995,7 @@ def save_bw_mask_as_png(mask, filename):
         # Сохраняем как PNG
         png_buffer = io.BytesIO()
         plt.savefig(png_buffer, format='png', bbox_inches='tight', pad_inches=0, 
-                    dpi=300, facecolor='none', edgecolor='none')
+                    dpi=dpi, facecolor='none', edgecolor='none')
         plt.close(fig)
         
         png_buffer.seek(0)
@@ -902,7 +1009,8 @@ def resize_layer_to_match(layer, target_shape):
     if layer.shape[:2] == target_shape[:2]:
         return layer
     
-    return cv2.resize(layer, (target_shape[1], target_shape[0]), interpolation=cv2.INTER_LINEAR)
+    return cv2.resize(layer, (target_shape[1], target_shape[0]), 
+                      interpolation=cv2.INTER_LINEAR)
 
 # ==================== ПРЕДОПРЕДЕЛЕННЫЕ ПАЛИТРЫ ДЛЯ INKSPLIT ====================
 
@@ -945,33 +1053,6 @@ def get_default_palettes():
         ]
     }
     return palettes
-
-def create_custom_palette_from_image(image, n_colors):
-    """Создает пользовательскую палитру из изображения"""
-    img_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    pixels = img_rgb.reshape(-1, 3)
-    
-    # Удаляем белый фон
-    bg_color = (255, 255, 255)
-    bg_mask = np.all(pixels == bg_color, axis=1)
-    if np.any(bg_mask):
-        pixels = pixels[~bg_mask]
-    
-    if len(pixels) == 0:
-        return []
-    
-    # Используем K-means для создания палитры
-    kmeans = KMeans(n_clusters=n_colors, random_state=42, n_init=10)
-    kmeans.fit(pixels)
-    
-    colors = kmeans.cluster_centers_.astype(int)
-    
-    # Создаем список цветов с именами
-    palette = []
-    for i, color in enumerate(colors):
-        palette.append((f"Цвет {i+1}", (int(color[0]), int(color[1]), int(color[2]))))
-    
-    return palette
 
 # ==================== БОКОВАЯ ПАНЕЛЬ ====================
 
@@ -1058,28 +1139,46 @@ with st.sidebar:
                                            help="Найти ближайшие соответствия в палитре")
             
             st.markdown("</div>", unsafe_allow_html=True)
+        
+        # Настройки для Fast Soft Color Segmentation
+        elif selected_method == "Fast Soft Color Segmentation (нейронная сеть)" and model_available:
+            st.markdown("<div class='fast-soft-options'>", unsafe_allow_html=True)
+            st.markdown("<h4>⚡ Настройки Fast Soft Color Segmentation</h4>", unsafe_allow_html=True)
             
-            # Настройки экспорта
-            st.markdown("<div class='export-options'>", unsafe_allow_html=True)
-            st.markdown("<h4>📤 Настройки экспорта</h4>", unsafe_allow_html=True)
+            # Масштаб
+            resize_factor = st.slider("Масштаб обработки", 0.5, 2.0, 1.0, 0.1,
+                                     help="Коэффициент изменения размера для обработки. Меньше = быстрее, но менее точно.",
+                                     label_visibility="collapsed")
             
-            export_format = st.selectbox("Формат экспорта", ["PNG", "PDF", "SVG", "Все форматы"],
-                                       help="Выберите формат для экспорта слоев")
+            # Порог для альфа-канала
+            alpha_threshold = st.slider("Порог непрозрачности", 0.01, 0.5, 0.1, 0.01,
+                                      help="Порог для определения видимых областей в альфа-канале",
+                                      label_visibility="collapsed")
             
-            include_labels = st.checkbox("Включить метки слоев", True,
-                                       help="Добавить текстовые метки к слоям")
-            
-            if include_labels:
-                label_font_size = st.slider("Размер шрифта меток", 10, 50, 20)
+            # Формат экспорта для Fast Soft
+            st.markdown("<h5>📤 Формат экспорта</h5>", unsafe_allow_html=True)
+            fast_soft_export_format = st.selectbox(
+                "Формат файлов для скачивания",
+                ["TIFF (рекомендуется)", "PNG", "Оба формата"],
+                help="Для профессиональной печати рекомендуется TIFF"
+            )
             
             st.markdown("</div>", unsafe_allow_html=True)
         
-        # Дополнительные настройки для нейронной сети
-        elif selected_method == "Fast Soft Color Segmentation (нейронная сеть)" and model_available:
-            st.markdown("<h4>⚡ Настройки нейронной сети</h4>", unsafe_allow_html=True)
-            resize_factor = st.slider("Масштаб", 0.5, 2.0, 1.0, 0.1,
-                                     help="Коэффициент изменения размера для обработки",
-                                     label_visibility="collapsed")
+        # Настройки экспорта для всех методов
+        st.markdown("<div class='export-options'>", unsafe_allow_html=True)
+        st.markdown("<h4>📤 Настройки экспорта</h4>", unsafe_allow_html=True)
+        
+        export_format = st.selectbox(
+            "Формат файлов",
+            ["PNG", "TIFF", "Оба формата"],
+            help="Выберите формат для скачивания файлов"
+        )
+        
+        include_readme = st.checkbox("Включить файл README", True,
+                                   help="Добавить текстовый файл с информацией о слоях")
+        
+        st.markdown("</div>", unsafe_allow_html=True)
         
         # Дополнительные опции для всех методов
         with st.expander("🛠️ Дополнительные настройки", expanded=False):
@@ -1130,6 +1229,14 @@ if st.session_state.uploaded_file is not None:
             <h4>🎯 Выбранный метод: <strong>{selected_method}</strong></h4>
             <p>📊 Количество цветов: <strong>{num_colors}</strong> | 🎨 Цвет фона: <span style='color: {bg_color}; font-weight: bold;'>{bg_color}</span></p>
             <p>🚀 <em>Специализированный метод для трафаретной печати с поддержкой подложки и цветовых палитр</em></p>
+        </div>
+        """, unsafe_allow_html=True)
+    elif selected_method == "Fast Soft Color Segmentation (нейронная сеть)":
+        st.markdown(f"""
+        <div class="method-card" style="border-left-color: #9c27b0;">
+            <h4>🎯 Выбранный метод: <strong>{selected_method}</strong></h4>
+            <p>📊 Количество цветов: <strong>{num_colors}</strong> | 🎨 Цвет фона: <span style='color: {bg_color}; font-weight: bold;'>{bg_color}</span></p>
+            <p>🚀 <em>Продвинутый метод с нейронной сетью. Создает слои с альфа-каналами для плавных переходов.</em></p>
         </div>
         """, unsafe_allow_html=True)
     else:
@@ -1227,19 +1334,31 @@ if st.session_state.uploaded_file is not None:
                             palette_colors = get_dominant_colors(image, num_colors)
                             
                             # Вызываем функцию decompose
+                            resize_factor_val = resize_factor if 'resize_factor' in locals() else 1.0
                             decompose_layers = decompose_fast_soft_color(
                                 image,
                                 num_colors=num_colors,
                                 palette=palette_colors,
-                                resize_scale_factor=resize_factor if 'resize_factor' in locals() else 1.0
+                                resize_scale_factor=resize_factor_val
                             )
                             
                             if decompose_layers:
+                                st.session_state.decompose_layers = decompose_layers
+                                
                                 # Преобразуем слои decompose в формат для отображения
                                 color_layers, color_info = decompose_layers_to_cv_format(
                                     decompose_layers, 
                                     bg_color_rgb
                                 )
+                                
+                                st.success(f"✅ Успешно создано {len(color_layers)} цветовых слоев с альфа-каналами!")
+                                st.info("""
+                                **Особенности метода Fast Soft Color Segmentation:**
+                                - Слои содержат альфа-каналы (прозрачность)
+                                - Плавные границы и переходы
+                                - Идеально для фотографий и градиентов
+                                - Рекомендуется экспорт в TIFF для сохранения качества
+                                """)
                             else:
                                 st.error("Не удалось выполнить разделение с помощью нейронной сети.")
                                 color_layers, color_info = [], []
@@ -1249,8 +1368,6 @@ if st.session_state.uploaded_file is not None:
                     st.session_state.color_info = color_info
                     
                     if color_layers and color_info:
-                        st.success(f"✅ Успешно создано {len(color_layers)} цветовых слоев!")
-                        
                         # Для метода Inksplit показываем дополнительную информацию
                         if selected_method == "Inksplit (для трафаретной печати)":
                             # Проверяем, есть ли подложка
@@ -1274,6 +1391,9 @@ if st.session_state.uploaded_file is not None:
         color_info = st.session_state.color_info
         
         if color_layers and color_info:
+            # Определяем метод для создания ЧБ масок
+            current_method = 'decompose' if selected_method == "Fast Soft Color Segmentation (нейронная сеть)" else 'kmeans'
+            
             # Для метода Inksplit показываем специальную информацию
             if selected_method == "Inksplit (для трафаретной печати)":
                 # Определяем, есть ли подложка
@@ -1318,34 +1438,61 @@ if st.session_state.uploaded_file is not None:
                             st.image(layer_rgb, use_column_width=True, 
                                    caption="Черная подложка для темных цветов")
                         else:
-                            st.image(layer_rgb, use_column_width=True)
+                            st.image(layer_rgb, use_column_width=True,
+                                   caption=f"Слой {i+1} - {selected_method}")
                         
                         # Кнопки для скачивания
-                        col_btn1, col_btn2 = st.columns(2)
+                        col_btn1, col_btn2, col_btn3 = st.columns(3)
                         
                         with col_btn1:
-                            # Черно-белая маска
-                            bw_mask = create_bw_mask(layer, bg_color_rgb)
-                            png_data = save_bw_mask_as_png(bw_mask, f"mask_{i+1}")
+                            # Черно-белая маска в TIFF
+                            bw_mask = create_bw_mask(layer, bg_color_rgb, current_method)
+                            tiff_data = save_bw_mask_as_tiff(bw_mask, f"mask_{i+1}")
                             
-                            if png_data:
+                            if tiff_data:
                                 # Определяем имя цвета для файла
                                 if 'matched_name' in info:
                                     color_name = info['matched_name'].replace(" ", "_")
                                 elif is_underbase:
                                     color_name = "Underbase"
+                                elif 'is_decompose_layer' in info:
+                                    color_name = f"layer_{i+1}"
                                 else:
                                     color_name = f"color_{i+1}"
                                 
                                 st.download_button(
-                                    label="⬇️ Скачать ЧБ маску",
-                                    data=png_data,
-                                    file_name=f"{color_name}_mask.png",
-                                    mime="image/png",
-                                    key=f"download_mask_{i}"
+                                    label="⬇️ TIFF маска",
+                                    data=tiff_data,
+                                    file_name=f"{color_name}_mask.tiff",
+                                    mime="image/tiff",
+                                    key=f"download_mask_tiff_{i}"
                                 )
                         
                         with col_btn2:
+                            # Черно-белая маска в PNG
+                            if bw_mask is None:
+                                bw_mask = create_bw_mask(layer, bg_color_rgb, current_method)
+                            png_data = save_bw_mask_as_png(bw_mask, f"mask_{i+1}")
+                            
+                            if png_data:
+                                if 'matched_name' in info:
+                                    color_name = info['matched_name'].replace(" ", "_")
+                                elif is_underbase:
+                                    color_name = "Underbase"
+                                elif 'is_decompose_layer' in info:
+                                    color_name = f"layer_{i+1}"
+                                else:
+                                    color_name = f"color_{i+1}"
+                                
+                                st.download_button(
+                                    label="⬇️ PNG маска",
+                                    data=png_data,
+                                    file_name=f"{color_name}_mask.png",
+                                    mime="image/png",
+                                    key=f"download_mask_png_{i}"
+                                )
+                        
+                        with col_btn3:
                             # Цветной слой
                             color_png_data = convert_to_png(layer_rgb, f"layer_{i+1}")
                             if color_png_data:
@@ -1353,11 +1500,13 @@ if st.session_state.uploaded_file is not None:
                                     color_name = info['matched_name'].replace(" ", "_")
                                 elif is_underbase:
                                     color_name = "Underbase"
+                                elif 'is_decompose_layer' in info:
+                                    color_name = f"layer_{i+1}"
                                 else:
                                     color_name = f"color_{i+1}"
                                 
                                 st.download_button(
-                                    label="⬇️ Скачать цветной слой",
+                                    label="⬇️ Цветной слой",
                                     data=color_png_data,
                                     file_name=f"{color_name}_color.png",
                                     mime="image/png",
@@ -1404,6 +1553,11 @@ if st.session_state.uploaded_file is not None:
                             if 'match_distance' in info:
                                 match_info = f"<br><strong>Сходство:</strong> {info['match_distance']:.2f}"
                             
+                            # Информация о методе decompose
+                            decompose_info = ""
+                            if 'is_decompose_layer' in info and info['is_decompose_layer']:
+                                decompose_info = "<br><strong>Тип:</strong> Слой с альфа-каналом"
+                            
                             st.markdown(f"""
                             <div style='padding: 15px; background-color: #f8f9fa; border-radius: 10px;'>
                                 <div style='display: flex; align-items: center; margin-bottom: 15px;'>
@@ -1416,8 +1570,9 @@ if st.session_state.uploaded_file is not None:
                                 <div style='margin-bottom: 10px;'>
                                     <strong>RGB:</strong> {display_color}<br>
                                     <strong>Покрытие:</strong> {info['percentage']:.1f}%<br>
-                                    <strong>Пикселей:</strong> {layer.shape[1]} × {layer.shape[0]}
+                                    <strong>Размер:</strong> {layer.shape[1]} × {layer.shape[0]}
                                     {match_info}
+                                    {decompose_info}
                                 </div>
                             </div>
                             """, unsafe_allow_html=True)
@@ -1540,11 +1695,27 @@ if st.session_state.uploaded_file is not None:
                     if layer.shape != combined.shape:
                         layer = resize_layer_to_match(layer, combined.shape)
                     
-                    # Создаем маску (где есть цвет, отличный от фона)
-                    mask = np.any(layer != bg_color_rgb, axis=2)
-                    
-                    # Применяем слой только там, где есть маска
-                    combined[mask] = layer[mask]
+                    # Для decompose слоев используем альфа-смешивание
+                    if selected_method == "Fast Soft Color Segmentation (нейронная сеть)" and \
+                       'is_decompose_layer' in color_info[idx] and color_info[idx]['is_decompose_layer']:
+                        
+                        if 'alpha_channel' in color_info[idx]:
+                            alpha = color_info[idx]['alpha_channel']
+                            # Проверяем размер альфа-канала
+                            if alpha.shape != combined.shape[:2]:
+                                alpha = cv2.resize(alpha, (combined.shape[1], combined.shape[0]))
+                            
+                            # Альфа-смешивание
+                            for c in range(3):
+                                combined[:, :, c] = combined[:, :, c] * (1 - alpha) + layer[:, :, c] * alpha
+                        else:
+                            # Стандартное наложение
+                            mask = np.any(layer != bg_color_rgb, axis=2)
+                            combined[mask] = layer[mask]
+                    else:
+                        # Стандартное наложение для других методов
+                        mask = np.any(layer != bg_color_rgb, axis=2)
+                        combined[mask] = layer[mask]
             
             # Сохраняем комбинированный превью в session state
             st.session_state.combined_preview = combined
@@ -1560,10 +1731,10 @@ if st.session_state.uploaded_file is not None:
                     use_column_width=True)
             
             # Кнопки для скачивания комбинированного изображения
-            col_comb1, col_comb2 = st.columns(2)
+            col_comb1, col_comb2, col_comb3 = st.columns(3)
             
             with col_comb1:
-                # Черно-белая маска комбинированного изображения
+                # Черно-белая маска комбинированного изображения в TIFF
                 combined_bw_mask = np.zeros((combined.shape[0], combined.shape[1]), dtype=np.uint8)
                 
                 for i, layer in enumerate(color_layers):
@@ -1574,26 +1745,51 @@ if st.session_state.uploaded_file is not None:
                         else:
                             layer_resized = layer
                         
-                        layer_mask = create_bw_mask(layer_resized, bg_color_rgb)
+                        layer_mask = create_bw_mask(layer_resized, bg_color_rgb, current_method)
                         combined_bw_mask = cv2.bitwise_or(combined_bw_mask, layer_mask)
+                
+                combined_tiff_data = save_bw_mask_as_tiff(combined_bw_mask, "combined_mask")
+                
+                if combined_tiff_data:
+                    st.download_button(
+                        label="⬇️ TIFF комбинированная маска",
+                        data=combined_tiff_data,
+                        file_name="combined_mask.tiff",
+                        mime="image/tiff",
+                        key="download_combined_mask_tiff"
+                    )
+            
+            with col_comb2:
+                # Черно-белая маска комбинированного изображения в PNG
+                if combined_bw_mask is None:
+                    combined_bw_mask = np.zeros((combined.shape[0], combined.shape[1]), dtype=np.uint8)
+                    for i, layer in enumerate(color_layers):
+                        if st.session_state.layer_visibility[i]:
+                            if layer.shape[:2] != combined_bw_mask.shape:
+                                layer_resized = resize_layer_to_match(layer, combined_bw_mask.shape[:2] + (3,))
+                            else:
+                                layer_resized = layer
+                            
+                            layer_mask = create_bw_mask(layer_resized, bg_color_rgb, current_method)
+                            combined_bw_mask = cv2.bitwise_or(combined_bw_mask, layer_mask)
                 
                 combined_png_data = save_bw_mask_as_png(combined_bw_mask, "combined_mask")
                 
                 if combined_png_data:
                     st.download_button(
-                        label="⬇️ Скачать комбинированную ЧБ маску",
+                        label="⬇️ PNG комбинированная маска",
                         data=combined_png_data,
                         file_name="combined_mask.png",
                         mime="image/png",
-                        key="download_combined_mask"
+                        key="download_combined_mask_png"
                     )
             
-            with col_comb2:
+            with col_comb3:
                 # Цветное комбинированное изображение
                 combined_color_png = convert_to_png(combined_rgb, "combined_preview")
                 if combined_color_png:
                     st.download_button(
-                        label="⬇️ Скачать цветной предпросмотр",
+                        label="⬇️ Цветной предпросмотр",
                         data=combined_color_png,
                         file_name="combined_preview.png",
                         mime="image/png",
@@ -1619,18 +1815,29 @@ if st.session_state.uploaded_file is not None:
                                     file_prefix = "Underbase"
                                 elif 'matched_name' in color_info[i]:
                                     file_prefix = color_info[i]['matched_name'].replace(" ", "_")
+                                elif 'is_decompose_layer' in color_info[i]:
+                                    file_prefix = f"layer_{i+1}_decompose"
                                 else:
                                     file_prefix = f"layer_{i+1}"
                                 
-                                # Черно-белая маска
-                                bw_mask = create_bw_mask(layer, bg_color_rgb)
-                                mask_png = save_bw_mask_as_png(bw_mask, f"{file_prefix}_mask")
+                                # Черно-белая маска в TIFF
+                                bw_mask = create_bw_mask(layer, bg_color_rgb, current_method)
+                                tiff_data = save_bw_mask_as_tiff(bw_mask, f"{file_prefix}_mask")
                                 
-                                if mask_png:
-                                    mask_path = os.path.join(tmpdirname, f"{file_prefix}_mask.png")
-                                    with open(mask_path, 'wb') as f:
-                                        f.write(mask_png)
-                                    all_files.append(mask_path)
+                                if tiff_data:
+                                    tiff_path = os.path.join(tmpdirname, f"{file_prefix}_mask.tiff")
+                                    with open(tiff_path, 'wb') as f:
+                                        f.write(tiff_data)
+                                    all_files.append(tiff_path)
+                                
+                                # Черно-белая маска в PNG
+                                png_data = save_bw_mask_as_png(bw_mask, f"{file_prefix}_mask")
+                                
+                                if png_data:
+                                    png_path = os.path.join(tmpdirname, f"{file_prefix}_mask.png")
+                                    with open(png_path, 'wb') as f:
+                                        f.write(png_data)
+                                    all_files.append(png_path)
                                 
                                 # Цветной слой
                                 layer_rgb = cv2.cvtColor(layer, cv2.COLOR_BGR2RGB)
@@ -1643,11 +1850,17 @@ if st.session_state.uploaded_file is not None:
                                     all_files.append(color_path)
                         
                         # Сохраняем комбинированные изображения
+                        if combined_tiff_data:
+                            combined_tiff_path = os.path.join(tmpdirname, "combined_mask.tiff")
+                            with open(combined_tiff_path, 'wb') as f:
+                                f.write(combined_tiff_data)
+                            all_files.append(combined_tiff_path)
+                        
                         if combined_png_data:
-                            combined_path = os.path.join(tmpdirname, "combined_mask.png")
-                            with open(combined_path, 'wb') as f:
+                            combined_png_path = os.path.join(tmpdirname, "combined_mask.png")
+                            with open(combined_png_path, 'wb') as f:
                                 f.write(combined_png_data)
-                            all_files.append(combined_path)
+                            all_files.append(combined_png_path)
                         
                         if combined_color_png:
                             combined_color_path = os.path.join(tmpdirname, "combined_preview.png")
@@ -1656,17 +1869,19 @@ if st.session_state.uploaded_file is not None:
                             all_files.append(combined_color_path)
                         
                         # Создаем README файл
+                        from datetime import datetime
                         readme_content = f"""# ColorSep Pro - Экспортированные слои
 
-Дата создания: {st.session_state.get('processing_time', 'Неизвестно')}
+Дата создания: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 Метод: {selected_method}
 Количество слоев: {len(color_layers)}
 Цвет фона: {bg_color}
 
 ## Содержимое архива:
-- Черно-белые маски каждого слоя (layer_X_mask.png)
+- Черно-белые маски каждого слоя в формате TIFF (layer_X_mask.tiff)
+- Черно-белые маски каждого слоя в формате PNG (layer_X_mask.png)
 - Цветные изображения каждого слоя (layer_X_color.png)
-- Комбинированные изображения (combined_*.png)
+- Комбинированные изображения (combined_*.png, combined_*.tiff)
 
 ## Информация о слоях:
 """
@@ -1691,7 +1906,11 @@ if st.session_state.uploaded_file is not None:
                                 if 'match_distance' in info:
                                     match_info = f", Сходство: {info['match_distance']:.2f}"
                                 
-                                readme_content += f"- Слой {i+1}: {color_name}, {hex_color}, RGB{display_color}, Покрытие: {info['percentage']:.1f}%{match_info}\n"
+                                decompose_info = ""
+                                if 'is_decompose_layer' in info and info['is_decompose_layer']:
+                                    decompose_info = ", Слой с альфа-каналом"
+                                
+                                readme_content += f"- Слой {i+1}: {color_name}, {hex_color}, RGB{display_color}, Покрытие: {info['percentage']:.1f}%{match_info}{decompose_info}\n"
                         
                         readme_path = os.path.join(tmpdirname, "README.txt")
                         with open(readme_path, 'w', encoding='utf-8') as f:
@@ -1722,6 +1941,32 @@ if st.session_state.uploaded_file is not None:
                             instructions_path = os.path.join(tmpdirname, "ПЕЧАТЬ_ИНСТРУКЦИЯ.txt")
                             with open(instructions_path, 'w', encoding='utf-8') as f:
                                 f.write(instructions_content)
+                            all_files.append(instructions_path)
+                        
+                        # Создаем инструкцию для Fast Soft
+                        if selected_method == "Fast Soft Color Segmentation (нейронная сеть)":
+                            fast_soft_instructions = """# ИНСТРУКЦИЯ ПО ИСПОЛЬЗОВАНИЮ - Fast Soft Color Segmentation
+
+## Особенности метода:
+- Слои содержат альфа-каналы (градации прозрачности)
+- Плавные границы и переходы между цветами
+- Идеально для фотографий, градиентов и сложных текстур
+
+## Рекомендации по использованию:
+1. Для профессиональной печати используйте файлы в формате TIFF
+2. Черно-белые маски в TIFF сохраняют высокое качество
+3. Для веб-использования подойдут файлы в формате PNG
+4. Альфа-каналы можно редактировать в графических редакторах
+
+## Программы для редактирования:
+- Adobe Photoshop: поддерживает TIFF с альфа-каналами
+- GIMP: бесплатный редактор с поддержкой TIFF
+- Affinity Photo: альтернатива Photoshop
+"""
+                            
+                            instructions_path = os.path.join(tmpdirname, "ИНСТРУКЦИЯ_FAST_SOFT.txt")
+                            with open(instructions_path, 'w', encoding='utf-8') as f:
+                                f.write(fast_soft_instructions)
                             all_files.append(instructions_path)
                         
                         # Создаем ZIP архив
@@ -1783,16 +2028,17 @@ with col_method1:
 with col_method2:
     if model_available:
         st.markdown("""
-        <div class="method-card">
+        <div class="method-card" style="border-left-color: #9c27b0;">
             <h4>⚡ Fast Soft Color Segmentation</h4>
-            <p><strong>Описание:</strong> Нейронная сеть для продвинутого разделения цветов.</p>
+            <p><strong>Описание:</strong> Нейронная сеть для продвинутого разделения цветов с альфа-каналами.</p>
             <p><strong>Преимущества:</strong></p>
             <ul>
-                <li>Создает слои с прозрачностью</li>
-                <li>Сохраняет плавные переходы</li>
-                <li>Лучше работает с градиентами</li>
+                <li>Создает слои с альфа-каналами (прозрачность)</li>
+                <li>Сохраняет плавные переходы и градиенты</li>
+                <li>Лучше работает с фотографиями</li>
+                <li>Экспорт в TIFF для профессиональной печати</li>
             </ul>
-            <p><strong>Идеально для:</strong> Фотографии, градиенты, сложные текстуры</p>
+            <p><strong>Идеально для:</strong> Фотографии, градиенты, сложные текстуры, профессиональная печать</p>
         </div>
         """, unsafe_allow_html=True)
     else:
@@ -1804,33 +2050,36 @@ with col_method2:
             <p><strong>Преимущества метода:</strong></p>
             <ul>
                 <li>Нейронная сеть для точного разделения</li>
-                <li>Слои с альфа-каналами</li>
-                <li>Идеально для сложных изображений</li>
+                <li>Слои с альфа-каналами (прозрачность)</li>
+                <li>Идеально для сложных изображений и градиентов</li>
+                <li>Экспорт в TIFF для профессиональной печати</li>
             </ul>
         </div>
         """, unsafe_allow_html=True)
     
-    # Дополнительная информация о методе Inksplit
+    # Дополнительная информация о форматах
     st.markdown("""
     <div class="method-card" style="border-left-color: #4CAF50;">
-        <h4>ℹ️ О методе Inksplit</h4>
-        <p><strong>Что такое подложка (Underbase)?</strong></p>
-        <p>Подложка - это специальный слой, который печатается первым и служит основой для светлых цветов на темных поверхностях.</p>
-        
-        <p><strong>Преимущества подложки:</strong></p>
+        <h4>ℹ️ О форматах файлов</h4>
+        <p><strong>TIFF (Tagged Image File Format):</strong></p>
         <ul>
-            <li>Улучшает яркость светлых цветов</li>
-            <li>Повышает стойкость печати</li>
-            <li>Снижает влияние цвета материала</li>
+            <li>Без потерь качества</li>
+            <li>Поддержка альфа-каналов</li>
+            <li>Высокое разрешение (до 300 DPI и более)</li>
+            <li>Идеально для профессиональной печати</li>
+            <li>Большой размер файла</li>
         </ul>
         
-        <p><strong>Когда использовать Inksplit?</strong></p>
+        <p><strong>PNG (Portable Network Graphics):</strong></p>
         <ul>
-            <li>Печать на темных тканях</li>
-            <li>Шелкография на текстиле</li>
-            <li>Трафаретная печать</li>
-            <li>Профессиональная полиграфия</li>
+            <li>Без потерь качества</li>
+            <li>Поддержка прозрачности</li>
+            <li>Меньший размер файла</li>
+            <li>Идеально для веб-использования</li>
+            <li>Ограниченное разрешение</li>
         </ul>
+        
+        <p><strong>Рекомендация:</strong> Для печати используйте TIFF, для веба - PNG.</p>
     </div>
     """, unsafe_allow_html=True)
 
@@ -1842,8 +2091,8 @@ st.markdown("""
     <h4>🎨 ColorSep Pro</h4>
     <p>Профессиональный инструмент для разделения цветов</p>
     <p style="font-size: 0.9em;">Поддерживаемые форматы: JPG, PNG, BMP, TIFF | Максимальный размер: 50MB</p>
-    <p style="font-size: 0.9em;">Все файлы экспортируются в формате PNG для промышленной совместимости</p>
-    <p style="font-size: 0.9em;">Метод Inksplit специально разработан для трафаретной печати и шелкографии</p>
+    <p style="font-size: 0.9em;">Экспорт в TIFF и PNG для профессиональной печати и веб-использования</p>
+    <p style="font-size: 0.9em;">Метод Fast Soft Color Segmentation создает слои с альфа-каналами для плавных переходов</p>
 </div>
 """, unsafe_allow_html=True)
 
